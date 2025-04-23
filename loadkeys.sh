@@ -1,10 +1,10 @@
 #!/bin/bash
 
-IS_VERBOSE=$1
-SSH_DIR="$HOME/.ssh"
-KEYS_LOC="$SSH_DIR/keys.txt"
+declare IS_VERBOSE=$1
+declare SSH_DIR="$HOME/.ssh"
+declare KEYS_LOC="$SSH_DIR/keys.txt"
 #SHOULD_LOAD_KEYS_AGAIN=false
-CURRENT_KEYS_COUNT=0
+declare CURRENT_KEYS_COUNT=0
 
 log() {
     # echo "$IS_VERBOSE"
@@ -39,10 +39,10 @@ main() {
     log "Updating keys.txt"
     update_keys_file
     CURRENT_KEYS_COUNT=$(ssh-add -L | wc -l)
-    log $CURRENT_KEYS_COUNT
+    log "$CURRENT_KEYS_COUNT"
     t2=$(wc -l "$KEYS_LOC" | awk {'print $1'})
-    log $t2
-    if [ $CURRENT_KEYS_COUNT -ne $t2 ]; then
+    log "$t2"
+    if [ "$CURRENT_KEYS_COUNT" -ne "$t2" ]; then
         log "loading keys"
         delete_keys_from_agent
         add_keys_to_agent
