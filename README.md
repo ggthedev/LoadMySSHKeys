@@ -36,7 +36,7 @@ A comprehensive SSH key management tool that provides a menu-driven interface fo
 
 1. Download the script:
 ```bash
-curl -O https://raw.githubusercontent.com/yourusername/ssh-key-manager/main/LOADSSHKey.sh
+curl -O https://raw.githubusercontent.com/ggthedev/ssh-key-manager/main/LOADSSHKey.sh
 ```
 
 2. Make the script executable:
