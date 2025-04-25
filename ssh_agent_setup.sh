@@ -10,17 +10,20 @@
 #
 # Designed to be sourced:
 #   `source /path/to/ssh_agent_setup.sh`
-#   `source /path/to/ssh_agent_setup.sh /path/to/my_keys.txt`
+#   `source /path/to/ssh_agent_setup.sh [filename]`
+#   `source /path/to/ssh_agent_setup.sh -v [filename]`
 #
 # Behavior:
 # - Silent by default.
 # - Checks if SSH_AUTH_SOCK/SSH_AGENT_PID are already set and valid; if so, exits.
 # - Tries to source ~/.ssh/agent.env and validate that agent.
 # - If no valid agent found, starts a new one and saves details to ~/.ssh/agent.env.
-# - If sourced *without* an argument, scans $SSH_DIR for valid private keys
+# - If sourced *without* a filename argument, scans $SSH_DIR for valid private keys
 #   (using ssh-keygen -y) and attempts to load them.
 # - If sourced *with* a readable filename as an argument, attempts to load
 #   the key names listed in that file (one per line, # comments ignored).
+# - The `-v` or `--verbose` flag can be passed as the first argument to enable
+#   DEBUG level logging (e.g., `source ... -v my_keys.txt`).
 # - Uses `return` instead of `exit`.
 #
 # Key Loading Notes:
@@ -28,13 +31,19 @@
 # - Keys requiring passphrases not in Keychain will likely fail to load silently.
 #
 # Logging:
-# - Logging is OFF by default.
-# - To enable debug logging, set the environment variable:
-#   `export SSH_AGENT_SETUP_LOG=~/.ssh/agent_setup.log`
-#   BEFORE sourcing this script.
+# - Logging is OFF by default, except if `-v` or `--verbose` is passed.
+# - Log file location is determined automatically (OS-specific) or by the
+#   `SSH_AGENT_SETUP_LOG` environment variable (if set).
+#   Example: `export SSH_AGENT_SETUP_LOG=~/.ssh/agent_setup.log`
+
+# Capture start time for execution duration logging
+_sa_script_start_time=$(date +%s.%N) # Use %s.%N for nanoseconds if supported
 
 # Treat unset variables as errors
 set -u
+
+# Flag to control verbose/debug logging (will be set by argument parsing)
+declare _sa_IS_VERBOSE="false"
 
 # --- Configuration ---
 declare SSH_DIR="$HOME/.ssh"
@@ -137,7 +146,11 @@ _log_base() {
 log_info() { _log_base "INFO" "$1"; }
 log_error() { _log_base "ERROR" "$1"; }
 log_warn() { _log_base "WARN" "$1"; }
-log_debug() { _log_base "DEBUG" "$1"; }
+log_debug() {
+    # Only log if verbose mode is enabled
+    [ "$_sa_IS_VERBOSE" = "true" ] || return 0
+    _log_base "DEBUG" "$1";
+}
 
 # --- Core Agent Functions (Adapted from loadSSHKEYS.sh) ---
 
@@ -257,16 +270,15 @@ _sa_update_keys_list_file() {
 }
 
 # Function: _sa_add_keys_to_agent (Internal version)
-# Description: Adds keys listed in VALID_KEY_LIST_FILE to the agent. Silent.
+# Description: Adds keys listed in VALID_KEY_LIST_FILE to the agent using a single ssh-add call. Silent.
 # Input: Uses SSH_DIR, VALID_KEY_LIST_FILE
-# Output: Returns 0 if at least one key added successfully, 1 otherwise.
+# Output: Returns 0 on success (even if some keys failed but agent call succeeded), 1 on major failure.
 _sa_add_keys_to_agent() {
-    log_debug "_sa_add_keys_to_agent: Entering function."
-    log_info "_sa_add_keys_to_agent: Adding keys listed in $VALID_KEY_LIST_FILE to the agent..."
+    log_debug "_sa_add_keys_to_agent: Entering function (single call version)."
+    log_info "_sa_add_keys_to_agent: Preparing to add keys listed in $VALID_KEY_LIST_FILE..."
     local keyfile
     local key_path
-    local added_count=0
-    local failed_count=0
+    local key_paths_to_add=() # Array to hold full paths
     local platform
     platform=$(uname -s)
 
@@ -276,49 +288,61 @@ _sa_add_keys_to_agent() {
         return 1 # Nothing to add
     fi
 
-    log_debug "_sa_add_keys_to_agent: Starting loop through keys in $VALID_KEY_LIST_FILE..."
+    # Read filenames and construct full paths
+    log_debug "_sa_add_keys_to_agent: Reading filenames from $VALID_KEY_LIST_FILE..."
+    local line_count=0
+    local invalid_path_count=0
     while IFS= read -r keyfile || [ -n "$keyfile" ]; do
+        ((line_count++))
         [ -z "$keyfile" ] && continue # Skip empty lines
         key_path="$SSH_DIR/$keyfile"
-        log_debug "_sa_add_keys_to_agent: Processing key entry: $keyfile (Path: $key_path)"
+        log_debug "_sa_add_keys_to_agent: Processing line $line_count: $keyfile -> $key_path"
 
         if [ -f "$key_path" ]; then
-            log_debug "_sa_add_keys_to_agent: Attempting to add key: $key_path (Platform: $platform)"
-            local ssh_add_status=0
-
-            # Run ssh-add silently, capture status, allow failure
-            if [[ "$platform" == "Darwin" ]]; then
-                ssh-add --apple-use-keychain "$key_path" >/dev/null 2>&1 || true
-                ssh_add_status=${PIPESTATUS[0]:-$?}
-            else
-                ssh-add "$key_path" >/dev/null 2>&1 || true
-                ssh_add_status=${PIPESTATUS[0]:-$?}
-            fi
-            log_debug "_sa_add_keys_to_agent: ssh-add finished for '$key_path' with status: $ssh_add_status"
-
-            if [ $ssh_add_status -eq 0 ]; then
-                log_info "_sa_add_keys_to_agent: Successfully added $keyfile"
-                ((added_count++))
-            else
-                # Log only as warning - could be passphrase needed or invalid key
-                log_warn "_sa_add_keys_to_agent: Failed to add key: $keyfile (status: $ssh_add_status). Check passphrase or key format."
-                ((failed_count++))
-            fi
+            key_paths_to_add+=("$key_path")
         else
             log_warn "_sa_add_keys_to_agent: Key file '$keyfile' listed but not found at '$key_path'. Skipping."
-            ((failed_count++)) # Count missing files as failures too
+            ((invalid_path_count++))
         fi
     done < "$VALID_KEY_LIST_FILE"
-    log_debug "_sa_add_keys_to_agent: Finished loop through keys."
-    log_info "_sa_add_keys_to_agent: Summary: Added: $added_count, Failed/Skipped: $failed_count"
 
-    # Return 0 if at least one key was added successfully
-    if [ "$added_count" -gt 0 ]; then
-      log_debug "_sa_add_keys_to_agent: Exiting function (status: 0 - keys added)."
-      return 0
-    else
-      log_debug "_sa_add_keys_to_agent: Exiting function (status: 1 - no keys added)."
-      return 1
+    if [ ${#key_paths_to_add[@]} -eq 0 ]; then
+        log_warn "_sa_add_keys_to_agent: No valid key file paths found to add after reading list."
+        return 1 # Nothing valid to add
+    fi
+
+    log_info "_sa_add_keys_to_agent: Attempting to add ${#key_paths_to_add[@]} keys in a single call..."
+    log_debug "_sa_add_keys_to_agent: Keys: ${key_paths_to_add[*]}"
+
+    local ssh_add_cmd=("ssh-add")
+    if [[ "$platform" == "Darwin" ]]; then
+        ssh_add_cmd+=("--apple-use-keychain")
+    fi
+    ssh_add_cmd+=("${key_paths_to_add[@]}")
+
+    # Execute the single ssh-add command silently, capture status
+    log_debug "_sa_add_keys_to_agent: Executing: ${ssh_add_cmd[*]}"
+    # Redirect stderr to stdout to potentially log errors if needed, allow failure
+    local ssh_add_output
+    ssh_add_output=$("${ssh_add_cmd[@]}" 2>&1 || true)
+    local ssh_add_status=${PIPESTATUS[0]:-$?}
+    log_debug "_sa_add_keys_to_agent: Single ssh-add call finished with status: $ssh_add_status"
+
+    # Basic check: Status 0 is success, status 1 might mean some failed (e.g., passphrase), status 2 is agent connection error
+    if [ $ssh_add_status -eq 0 ]; then
+        log_info "_sa_add_keys_to_agent: ssh-add reported success (status 0). Assumed all specified keys added."
+        log_debug "_sa_add_keys_to_agent: Exiting function (status: 0)."
+        return 0
+    elif [ $ssh_add_status -eq 1 ]; then
+        log_warn "_sa_add_keys_to_agent: ssh-add reported partial failure (status 1). Some keys might require passphrase or be invalid."
+        log_warn "ssh-add output (if any): $ssh_add_output"
+        log_debug "_sa_add_keys_to_agent: Exiting function (status: 0 - partial success treated as OK for setup)."
+        return 0 # Treat partial success as OK for setup purposes
+    else # Status 2 or other errors
+        log_error "_sa_add_keys_to_agent: ssh-add failed (status: $ssh_add_status). Could not add keys."
+        log_error "ssh-add output (if any): $ssh_add_output"
+        log_debug "_sa_add_keys_to_agent: Exiting function (status: 1 - failure)."
+        return 1 # Major failure
     fi
 }
 
@@ -422,27 +446,78 @@ _sa_ensure_ssh_agent() {
     fi
 }
 
+# --- Finalization Function ---
+
+_sa_log_execution_time() {
+    log_debug "_sa_log_execution_time: Trap triggered."
+    local _sa_end_time _sa_script_duration
+    # Check if start time variable exists (it should if script reached this point)
+    if [ -n "${_sa_script_start_time:-}" ]; then
+        log_debug "_sa_log_execution_time: Start time found: ${_sa_script_start_time}"
+        _sa_end_time=$(date +%s.%N)
+        log_debug "_sa_log_execution_time: End time captured: ${_sa_end_time}"
+
+        # Use bc for floating point calculation if available
+        if command -v bc > /dev/null; then
+            log_debug "_sa_log_execution_time: Found 'bc'. Attempting calculation: ${_sa_end_time} - ${_sa_script_start_time}"
+            _sa_script_duration=$(echo "$_sa_end_time - $_sa_script_start_time" | bc -l)
+            local bc_status=$?
+            log_debug "_sa_log_execution_time: bc status: $bc_status, Result: '$_sa_script_duration'"
+            if [ $bc_status -ne 0 ]; then
+                log_error "_sa_log_execution_time: bc calculation failed."
+            else
+                # Format using printf
+                local _sa_formatted_duration
+                _sa_formatted_duration=$(printf "%.3f" "$_sa_script_duration")
+                log_info "Total setup script execution time: ${_sa_formatted_duration} seconds."
+            fi
+        else
+            log_warn "'bc' command not found, attempting fallback to integer seconds."
+            # Fallback to integer seconds if bc is not available
+            local _sa_start_seconds _sa_end_seconds
+            # Try getting seconds directly from variable if possible
+             _sa_start_seconds=${_sa_script_start_time%%.*}
+             _sa_end_seconds=${_sa_end_time%%.*}
+             log_debug "_sa_log_execution_time: Fallback seconds: Start=$_sa_start_seconds, End=$_sa_end_seconds"
+             if [[ -n "$_sa_start_seconds" && -n "$_sa_end_seconds" ]]; then
+                 _sa_script_duration=$((_sa_end_seconds - _sa_start_seconds))
+                 log_info "Total setup script execution time: ${_sa_script_duration} seconds."
+             else
+                 log_error "_sa_log_execution_time: Failed to parse integer seconds for fallback calculation."
+             fi
+        fi
+    else
+        log_warn "_sa_log_execution_time: Could not calculate execution time: start time variable (_sa_script_start_time) not found."
+    fi
+    log_debug "_sa_log_execution_time: Function finished."
+}
+
 # --- Main Execution Logic (when sourced) ---
 
 log_debug "ssh_agent_setup.sh: Script sourced. Running setup logic..."
 
-# Optional: Quick exit if already seems configured and valid
+# Argument Parsing for sourced script
+# Check for verbose flag first
+if [ "$#" -ge 1 ] && [[ "$1" == "-v" || "$1" == "--verbose" ]]; then
+    _sa_IS_VERBOSE="true"
+    log_debug "ssh_agent_setup.sh: Verbose logging enabled by argument."
+    shift # Remove the verbose flag from arguments
+fi
 
-# Ensure agent is running and variables are exported
+# Agent setup must happen regardless of other args
 if ! _sa_ensure_ssh_agent; then
     log_error "ssh_agent_setup.sh: Failed to ensure SSH agent is running."
     return 1 # Use 'return' as this script is sourced
 fi
-
-# Agent should now be running and SSH_AUTH_SOCK/SSH_AGENT_PID exported
+log_debug "ssh_agent_setup.sh: Agent setup complete."
 
 # --- Load keys ---
 LOAD_METHOD="scan" # Default: Scan SSH directory
 KEY_SOURCE_FILE=""
 
-# Check if a filename argument was passed during sourcing
+# Check if a filename argument remains *after* potential verbose flag shift
 if [ "$#" -ge 1 ] && [ -n "$1" ]; then
-    log_debug "ssh_agent_setup.sh: Argument provided: $1. Treating as key list file."
+    log_debug "ssh_agent_setup.sh: Remaining argument provided: $1. Treating as key list file."
     # Basic validation: Check if the provided argument is a readable file
     if [ -f "$1" ] && [ -r "$1" ]; then
         log_info "ssh_agent_setup.sh: Using provided file '$1' as source for key names."
@@ -453,7 +528,7 @@ if [ "$#" -ge 1 ] && [ -n "$1" ]; then
         # Keep LOAD_METHOD="scan"
     fi
 else
-    log_debug "ssh_agent_setup.sh: No argument provided. Scanning $SSH_DIR for keys."
+    log_debug "ssh_agent_setup.sh: No filename argument provided. Scanning $SSH_DIR for keys."
     # Keep LOAD_METHOD="scan"
 fi
 
@@ -509,5 +584,9 @@ else
      log_warn "ssh_agent_setup.sh: Key list file '$VALID_KEY_LIST_FILE' is not available. Skipping key loading."
 fi
 
+# Log execution time before returning
+_sa_log_execution_time
+
+log_debug "ssh_agent_setup.sh: Reached end of main execution block. Final return 0 coming up."
 log_debug "ssh_agent_setup.sh: Setup complete."
 return 0 # Indicate success (even if keys failed to load, agent is running) 
