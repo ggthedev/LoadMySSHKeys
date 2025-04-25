@@ -55,6 +55,8 @@ esac
 
 # Define the target SSH directory
 declare SSH_DIR="$HOME/.ssh"
+# Persistent file within SSH_DIR used by add_keys_to_agent for the list of keys to add
+declare VALID_KEY_LIST_FILE="$SSH_DIR/.ssh_agent_setup_valid_keys"
 
 # Use a temporary file for the key list
 declare KEYS_LIST_TMP
@@ -380,7 +382,10 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
   -l, --list      List keys currently loaded in the ssh-agent.
   -a, --add       Add all keys from the SSH directory ($SSH_DIR) to the agent 
-                  (removes existing keys first).
+                  (removes existing keys first, uses ssh-keygen -y validation).
+  -f <file>, --file <file>
+                  Add keys listed in the specified <file> (one key name per line,
+                  '#' comments and blank lines ignored).
   -D, --delete-all Delete all keys currently loaded in the ssh-agent (prompts for confirmation).
   -m, --menu      Show the interactive menu interface.
   -h, --help      Display this help message and exit.
@@ -388,9 +393,10 @@ Options:
 Default Behavior:
   If run without any options, this help message is displayed.
 
-Examples:
+Examples (This Script - $(basename "$0")):
   $(basename "$0") --list     # List loaded keys
-  $(basename "$0") --add      # Load all keys from $SSH_DIR
+  $(basename "$0") --add      # Load all valid keys found in $SSH_DIR
+  $(basename "$0") --file my_keys.txt # Load keys listed in my_keys.txt
   $(basename "$0") --delete-all # Delete all loaded keys
   $(basename "$0") --menu     # Start the interactive menu
 
@@ -477,21 +483,24 @@ delete_keys_from_agent() {
 
 add_keys_to_agent() {
     log "Entering function: ${FUNCNAME[0]}"
-    log "Adding keys listed in $KEYS_LIST_TMP to the agent..."
+    log "Adding keys listed in $VALID_KEY_LIST_FILE to the agent..."
     local keyfile
     local key_path
     local added_count=0
     local failed_count=0
+    local platform
+    platform=$(uname -s)
 
-    if [ ! -s "$KEYS_LIST_TMP" ]; then
-        printf "No SSH keys found in directory list. Nothing to add.\n" | tee -a "$LOG_FILE"
-        log "Key list file ($KEYS_LIST_TMP) is empty or does not exist. No keys to add."
+    # Check if VALID_KEY_LIST_FILE exists and is non-empty
+    if [ ! -s "$VALID_KEY_LIST_FILE" ]; then
+        printf "Key list file '%s' is empty or does not exist. Nothing to add.\n" "$VALID_KEY_LIST_FILE" | tee -a "$LOG_FILE"
+        log "Key list file ($VALID_KEY_LIST_FILE) is empty or does not exist. No keys to add."
         log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - no keys list)"
         return 1 # Indicate failure condition - no keys to even try adding
     fi
 
-    printf "Adding SSH keys to agent...\n" | tee -a "$LOG_FILE"
-    log_debug "add_keys_to_agent: Starting loop through keys in $KEYS_LIST_TMP..."
+    printf "Adding SSH keys to agent (from %s)...\n" "$VALID_KEY_LIST_FILE" | tee -a "$LOG_FILE"
+    log_debug "add_keys_to_agent: Starting loop through keys in $VALID_KEY_LIST_FILE..."
     while IFS= read -r keyfile || [[ -n "$keyfile" ]]; do
         [ -z "$keyfile" ] && continue
         key_path="$SSH_DIR/$keyfile"
@@ -521,7 +530,11 @@ add_keys_to_agent() {
 
             # Log the raw output from ssh-add as well
             if [ -n "$ssh_add_output" ]; then
-                 echo "$ssh_add_output" >> "$LOG_FILE"
+                 # Avoid logging the full key data if successful?
+                 # Maybe just log if status is non-zero or output contains 'fail'/'error'
+                 if [ "$ssh_add_status" -ne 0 ] || [[ "$ssh_add_output" == *[Ee][Rr][Rr][Oo][Rr]* ]] || [[ "$ssh_add_output" == *[Ff][Aa][Ii][Ll]* ]]; then
+                     log "ssh-add output: $ssh_add_output"
+                 fi
             fi
 
             if [ $ssh_add_status -eq 0 ]; then
@@ -530,7 +543,7 @@ add_keys_to_agent() {
                 ((added_count++))
             else
                 printf "  ✗ Failed to add (status: %d)\n" "$ssh_add_status" | tee -a "$LOG_FILE"
-                log_error "Failed to add key: $keyfile (status: $ssh_add_status). Output logged above."
+                log_error "Failed to add key: $keyfile (status: $ssh_add_status). Output logged if relevant."
                 ((failed_count++))
             fi
         else
@@ -538,7 +551,7 @@ add_keys_to_agent() {
             log_warn "Key file '$keyfile' listed but not found at '$key_path'. Skipping."
             ((failed_count++)) # Count missing files as failures too
         fi
-    done < "$KEYS_LIST_TMP"
+    done < "$VALID_KEY_LIST_FILE"
     log_debug "add_keys_to_agent: Finished loop through keys."
 
     printf "\nSummary: %d key(s) added, %d key(s) failed\n" "$added_count" "$failed_count" | tee -a "$LOG_FILE"
@@ -992,6 +1005,72 @@ run_delete_all_cli() {
     exit $exit_status
 }
 
+# Function to handle the --file action
+run_load_keys_from_file() {
+    local source_key_file="$1"
+    log_info "CLI Action: Loading keys from file: $source_key_file..."
+    # Logging already initialized
+
+    # Validate input file
+    if [ ! -f "$source_key_file" ] || [ ! -r "$source_key_file" ]; then
+        printf "Error: Key list file not found or not readable: %s\n" "$source_key_file" >&2
+        log_error "run_load_keys_from_file: Key list file not found or not readable: $source_key_file"
+        exit 1
+    fi
+
+    log_debug "run_load_keys_from_file: Validating SSH dir ($SSH_DIR)..."
+    if ! validate_ssh_dir; then exit 1; fi
+    log_debug "run_load_keys_from_file: Ensuring agent..."
+    if ! ensure_ssh_agent; then exit 1; fi
+
+    # Prepare the VALID_KEY_LIST_FILE by copying from source
+    log_debug "run_load_keys_from_file: Preparing target list file $VALID_KEY_LIST_FILE from source $source_key_file"
+    if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
+         printf "Error: Cannot create or touch internal key list file '%s'. Check permissions in %s.\n" "$VALID_KEY_LIST_FILE" "$SSH_DIR" >&2
+         log_error "run_load_keys_from_file: Cannot create/touch '$VALID_KEY_LIST_FILE'"
+         exit 1
+    fi
+    chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "run_load_keys_from_file: Could not set permissions on $VALID_KEY_LIST_FILE"
+
+    # Clear the list file first
+    log_debug "run_load_keys_from_file: Clearing target list file: $VALID_KEY_LIST_FILE"
+    if command -v truncate > /dev/null; then
+        truncate -s 0 "$VALID_KEY_LIST_FILE"
+    else
+        echo -n > "$VALID_KEY_LIST_FILE"
+    fi
+    if [ $? -ne 0 ]; then
+         printf "Error: Failed to clear internal key list file '%s'.\n" "$VALID_KEY_LIST_FILE" >&2
+         log_error "run_load_keys_from_file: Failed to clear '$VALID_KEY_LIST_FILE'."
+         exit 1
+    fi
+
+    # Copy lines, skipping empty lines and comments
+    log_debug "run_load_keys_from_file: Copying key names from '$source_key_file' to '$VALID_KEY_LIST_FILE'"
+    grep -vE '^\s*(#|$)' "$source_key_file" >> "$VALID_KEY_LIST_FILE"
+    local copy_status=$?
+    if [ $copy_status -ne 0 ] && [ $copy_status -ne 1 ]; then # grep returns 1 if no lines selected
+         printf "Error: Failed to read from source key file '%s' (grep status: %d).\n" "$source_key_file" "$copy_status" >&2
+         log_error "run_load_keys_from_file: Failed to read from source key file '$source_key_file' (grep status: $copy_status)."
+         exit 1
+    fi
+
+    # Optional: Delete existing keys before adding? Mimic --add behaviour?
+    # For now, just add without deleting like the sourced version.
+    # log_debug "run_load_keys_from_file: Calling delete_keys_from_agent..."
+    # delete_keys_from_agent
+
+    # Call the core add function
+    log_debug "run_load_keys_from_file: Calling add_keys_to_agent..."
+    if ! add_keys_to_agent; then
+        log_error "run_load_keys_from_file: add_keys_to_agent failed."
+        exit 1 # Exit with error if adding failed
+    fi
+
+    log_info "CLI Action: Loading keys from file finished successfully."
+    exit 0
+}
+
 # --- Main Execution Logic ---
 run_interactive_menu() {
     # Logging already initialized by main script execution block
@@ -1130,6 +1209,7 @@ log_debug "Logging initialized. Proceeding with argument parsing."
 
 # Default action is help if no args or unknown args
 ACTION="help"
+source_key_file="" # Variable to hold filename for -f/--file
 
 # Simple argument parsing loop
 while [[ $# -gt 0 ]]; do
@@ -1141,6 +1221,17 @@ while [[ $# -gt 0 ]]; do
         -a|--add)
             ACTION="add"
             shift # past argument
+            ;;
+        -f|--file)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                 printf "Error: Option '%s' requires a filename argument.\n\n" "$1" >&2
+                 ACTION="help"
+                 break
+            fi
+            ACTION="file"
+            source_key_file="$2"
+            shift # past argument (-f or --file)
+            shift # past value (filename)
             ;;
         -D|--delete-all)
             ACTION="delete-all"
@@ -1171,11 +1262,14 @@ case $ACTION in
     add)
         run_load_keys
         ;;
-    menu)
-        run_interactive_menu
+    file)
+        run_load_keys_from_file "$source_key_file"
         ;;
     delete-all)
         run_delete_all_cli
+        ;;
+    menu)
+        run_interactive_menu
         ;;
     help|*)
         display_help
