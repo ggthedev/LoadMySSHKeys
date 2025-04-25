@@ -1,66 +1,103 @@
 #!/usr/bin/env bash
 #
-# SSH Agent Setup Script (for sourcing in .zshrc/.zshenv)
-# ------------------------------------------------------
-# Ensures a single ssh-agent is running per session and exports
-# the necessary environment variables (SSH_AUTH_SOCK, SSH_AGENT_PID).
-# Reuses existing agents via ~/.ssh/agent.env if possible.
-# Loads keys into the agent, either by scanning the SSH directory or
-# from an optional filename argument provided during sourcing.
+# SSH Agent Setup Script (for sourcing in .zshrc/.zshenv/.zprofile)
+# ================================================================
 #
-# Designed to be sourced:
-#   `source /path/to/ssh_agent_setup.sh`
-#   `source /path/to/ssh_agent_setup.sh [filename]`
-#   `source /path/to/ssh_agent_setup.sh -v [filename]`
+# Purpose:
+#   Ensures a single ssh-agent is running per login session, exports the necessary
+#   environment variables (SSH_AUTH_SOCK, SSH_AGENT_PID) for process inheritance,
+#   and loads SSH keys into the agent.
 #
-# Behavior:
-# - Silent by default.
-# - Checks if SSH_AUTH_SOCK/SSH_AGENT_PID are already set and valid; if so, exits.
-# - Tries to source ~/.ssh/agent.env and validate that agent.
-# - If no valid agent found, starts a new one and saves details to ~/.ssh/agent.env.
-# - If sourced *without* a filename argument, scans $SSH_DIR for private keys
-#   (identified by matching .pub files) and attempts to load them.
-# - If sourced *with* a readable filename as an argument, attempts to load
-#   the key names listed in that file (one per line, # comments ignored).
-# - The `-v` or `--verbose` flag can be passed as the first argument to enable
-#   DEBUG level logging (e.g., `source ... -v my_keys.txt`).
-# - Uses `return` instead of `exit`.
+# Features:
+#   - Reuses existing agents identified via a persistent environment file.
+#   - Starts a new agent if no valid one is found.
+#   - Saves new agent details to the persistent environment file.
+#   - Loads SSH keys into the agent based on different methods:
+#     - Scanning the SSH directory for private keys with matching .pub files (default).
+#     - Reading key names from a specified file provided as an argument.
+#   - Prevents redundant key loading if the agent already seems to hold the correct keys.
+#   - Provides optional verbose logging for debugging.
+#   - Designed to be sourced, using `return` instead of `exit`.
+#   - Uses function-local `set -u` for robustness without impacting the sourcing shell.
 #
-# Key Loading Notes:
-# - On macOS, uses --apple-use-keychain to avoid passphrase prompts if possible.
-# - Keys requiring passphrases not in Keychain will likely fail to load silently.
+# Best Practice for Sourcing:
+#   - Source this script from your login shell profile (e.g., ~/.zprofile for Zsh, ~/.profile).
+#     This ensures the agent runs once per login session, and variables are inherited.
+#     Example: `source /path/to/ssh_agent_setup.sh`
+#   - Sourcing from interactive shell profiles (e.g., ~/.zshrc) is possible but less efficient,
+#     as parts of the script will run in every new terminal (though optimizations exist).
 #
-# Logging:
-# - Logging is OFF by default, except if `-v` or `--verbose` is passed.
-# - Log file location is determined automatically (OS-specific) or by the
-#   `SSH_AGENT_SETUP_LOG` environment variable (if set).
-#   Example: `export SSH_AGENT_SETUP_LOG=~/.ssh/agent_setup.log`
+# Usage Examples (when sourcing):
+#   `source /path/to/ssh_agent_setup.sh`           # Scan default SSH dir for keys
+#   `source /path/to/ssh_agent_setup.sh ~/.ssh/my_keys.txt` # Load keys listed in file
+#   `source /path/to/ssh_agent_setup.sh -v`         # Scan with verbose logging
+#   `source /path/to/ssh_agent_setup.sh -v ~/.ssh/my_keys.txt` # Load from file with verbose logging
+#
+# Key Loading Details:
+#   - Identifies private keys by finding files in $SSH_DIR that do *not* end in .pub
+#     and *do* have a corresponding file with the same name plus .pub.
+#   - On macOS, automatically uses `--apple-use-keychain` with `ssh-add` to attempt
+#     loading keys stored in the Keychain without passphrase prompts.
+#   - Keys requiring passphrases (not stored in Keychain) will likely fail to load silently
+#     when added via `ssh-add` non-interactively.
+#
+# Logging Configuration:
+#   - Controlled by the `_sa_IS_VERBOSE` flag (set via `-v`/`--verbose` argument).
+#   - Log file location determined automatically based on OS (macOS: ~/Library/Logs, Linux: /var/log or ~/.local/log)
+#     or can be overridden by setting the `SSH_AGENT_SETUP_LOG` environment variable.
+#
 
-# Capture start time for execution duration logging
-_sa_script_start_time=$(date +%s.%N) # Use %s.%N for nanoseconds if supported
+# --- Script Initialization ---
 
-# Treat unset variables as errors
-#set -u
+# Capture start time for execution duration logging.
+# Avoids resetting if script is sourced multiple times in the same environment (though not recommended).
+_sa_script_start_time=${_sa_script_start_time:-$(date +%s.%N)}
 
-# --- Configuration ---
-declare SSH_DIR="$HOME/.ssh"
-declare AGENT_ENV_FILE="$HOME/.config/sshkeysloader/agent.env"
-# Persistent file within SSH_DIR to cache the list of valid key filenames
-declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeysloader/.ssh_keys"
+# Global flag to control verbose/debug logging. Set by sa_setup() argument parsing.
+declare _sa_IS_VERBOSE="false"
 
-# --- Log File Configuration ---
+# --- Configuration Variables ---
+# These variables define key locations used throughout the script.
+
+declare SSH_DIR="$HOME/.ssh"                                         # Standard SSH directory
+declare AGENT_ENV_FILE="$HOME/.config/sshkeysloader/agent.env"       # File to store/read agent connection details
+declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeysloader/.ssh_keys"  # Persistent file to cache list of valid key *basenames*
+
+# --- Log File Configuration Variables ---
+# Define standard names and potential directory locations for the log file.
+
 declare LOG_FILENAME="sshkeysloader.log"
+# Platform-specific log directory preferences:
 declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeysloader"
 declare LOG_DIR_LINUX_VAR="/var/log/sshkeysloader"
 declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeysloader"
-declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"
-
-# Flag to control verbose/debug logging (will be set by argument parsing)
-declare _sa_IS_VERBOSE="false"
+declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"                             # Fallback if others fail
 
 # --- Logging Setup ---
-declare LOG_FILE="" # Initialize empty; will be set if logging is configured successfully
+# Determines the actual log file path to use.
 
+declare LOG_FILE="" # Initialize empty; will be set by setup logic if successful
+
+# Function: _setup_default_logging
+# Purpose: Determines the appropriate default log file path based on the OS,
+#          creates the necessary directory and log file, and sets the LOG_FILE variable.
+#
+# Inputs:
+#   - Global Variables: LOG_DIR_MACOS, LOG_DIR_LINUX_VAR, LOG_DIR_LINUX_LOCAL,
+#                     LOG_DIR_FALLBACK, LOG_FILENAME
+#
+# Outputs:
+#   - Global Variables: Sets LOG_FILE to the determined path if successful, otherwise leaves it empty.
+#   - Files Modified: Creates the log directory and touches the log file ($LOG_FILE).
+#   - Return Value: 0 on success, 1 on failure (directory/file creation failed).
+#
+# Core Logic:
+#   1. Uses `uname -s` to detect the operating system (Darwin, Linux, other).
+#   2. Selects the preferred log directory based on OS conventions and permissions.
+#   3. Constructs the full target log path.
+#   4. Attempts to create the log directory (`mkdir -p`).
+#   5. Attempts to create the log file (`touch`).
+#   6. If successful, sets the global LOG_FILE variable and sets file permissions (chmod 600).
 _setup_default_logging() {
     set -u # Enable strict mode for this function
 
@@ -135,6 +172,23 @@ else
 fi
 
 # --- Logging Functions (Conditional) ---
+
+# Function: _log_base
+# Purpose: Core internal function for writing log entries to the configured log file.
+#          Handles timestamping and formatting.
+#          Checks if LOG_FILE is configured before attempting to write.
+#
+# Inputs:
+#   - Arguments: $1=LogLevel (e.g., "INFO", "DEBUG"), $2=LogMessage
+#   - Global Variables: LOG_FILE
+#
+# Outputs:
+#   - Files Modified: Appends the formatted log message to $LOG_FILE.
+#
+# Core Logic:
+#   1. Checks if LOG_FILE is empty; returns immediately if it is.
+#   2. Gets the current timestamp.
+#   3. Uses `printf` to format and append the log entry (Timestamp - PID - Level - Message).
 _log_base() {
     # Only log if LOG_FILE is set (not empty)
     [ -z "$LOG_FILE" ] && return 0 # Exit if LOG_FILE wasn't successfully configured
@@ -144,7 +198,19 @@ _log_base() {
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     # Use printf for safer handling of potentially weird characters in msg
     printf "%s - %s - %s - %s\n" "$timestamp" "$$" "$type" "$msg" >> "$LOG_FILE"
-}
+} # END _log_base
+
+# Function: log_info, log_error, log_warn, log_debug
+# Purpose: Convenience wrappers around _log_base for specific standard log levels.
+#          `log_debug` includes an additional check for the `_sa_IS_VERBOSE` flag.
+#
+# Inputs:
+#   - Arguments: $1=LogMessage
+#   - Global Variables: _sa_IS_VERBOSE (for log_debug only)
+#
+# Outputs: (Via _log_base)
+#   - Files Modified: Appends the formatted log message to $LOG_FILE.
+
 log_info() { _log_base "INFO" "$1"; }
 log_error() { _log_base "ERROR" "$1"; }
 log_warn() { _log_base "WARN" "$1"; }
@@ -152,11 +218,23 @@ log_debug() {
     # Only log if verbose mode is enabled
     [ "$_sa_IS_VERBOSE" = "true" ] || return 0
     _log_base "DEBUG" "$1";
-}
+} # END log_debug
 
-# --- Helper Functions ---
+# --- Helper and Finalization Functions ---
 
-# Cleanup function for trap
+# Function: _sa_cleanup
+# Purpose: Performs cleanup actions when the script exits (called via EXIT trap).
+#          Currently, it only contains logic related to the persistent key list file,
+#          which is commented out to avoid deleting it.
+#
+# Inputs:
+#   - Global Variables: VALID_KEY_LIST_FILE (uses default expansion `${VAR:-}` for safety with set -u)
+#
+# Outputs: None.
+#
+# Core Logic:
+#   1. Checks if the persistent key list file exists.
+#   2. (Commented out) Optionally remove the file (`rm -f`).
 _sa_cleanup() {
   # Use parameter expansion default to handle potentially unset variable with set -u
   if [ -n "${VALID_KEY_LIST_FILE:-}" ] && [ -f "${VALID_KEY_LIST_FILE:-}" ]; then
@@ -165,10 +243,22 @@ _sa_cleanup() {
     # log_debug "_sa_cleanup: Removing key list file $VALID_KEY_LIST_FILE"
     : # No cleanup needed for the persistent file
   fi
-}
+} # END _sa_cleanup
 
-# --- Finalization Function ---
-
+# Function: _sa_log_execution_time
+# Purpose: Calculates and logs the total execution time of the script.
+#          Called explicitly by sa_setup() before it returns.
+#
+# Inputs: None.
+#
+# Outputs:
+#   - Log Output: Debug/Info messages about execution time.
+#
+# Core Logic:
+#   1. Checks if start time variable exists (it should if script reached this point)
+#   2. Captures end time.
+#   3. Calculates duration using `date` command.
+#   4. Logs duration using log_info.
 _sa_log_execution_time() {
     log_debug "_sa_log_execution_time: Trap triggered."
     local _sa_end_time _sa_script_duration
@@ -210,14 +300,137 @@ _sa_log_execution_time() {
         log_warn "_sa_log_execution_time: Could not calculate execution time: start time variable (_sa_script_start_time) not found."
     fi
     log_debug "_sa_log_execution_time: Function finished."
-}
+} # END _sa_log_execution_time
 
-# --- Core Agent Functions (Adapted from loadSSHKEYS.sh) ---
+# --- Core Agent and Key Management Functions ---
 
-# Function: _sa_check_ssh_agent (Internal version)
-# Description: Checks if SSH_AUTH_SOCK/SSH_AGENT_PID point to a live agent.
-# Input: Uses exported SSH_AUTH_SOCK, SSH_AGENT_PID
-# Output: 0 if agent is accessible, 1 otherwise.
+# Function: _sa_write_valid_key_basenames_to_file
+# Purpose: Finds valid private SSH keys in the SSH directory (those with a
+#          corresponding .pub file), and writes their basenames (one per line) to the specified file.
+#
+# Input: Uses SSH_DIR
+# Argument $1: target_file - The file to write the basenames into.
+#
+# Output: Writes to the target file. Returns 0 if keys found and written, 1 otherwise.
+#
+# Core Logic:
+#   1. Checks if the target file exists and is writable.
+#   2. Finds all files in SSH_DIR that do not end in .pub.
+#   3. Checks if each file has a corresponding .pub file.
+#   4. Appends basenames of valid keys to the target file.
+#   5. Returns 0 if keys found and written, 1 otherwise.
+_sa_write_valid_key_basenames_to_file() {
+    set -u # Enable strict mode for this function
+
+    local target_file="$1"
+    log_debug "_sa_write_valid_key_basenames_to_file: Entering function. Target file: '$target_file'"
+
+    if [ -z "$target_file" ]; then
+        log_error "_sa_write_valid_key_basenames_to_file: No target file specified."
+        set +u # Disable strict mode before returning
+        return 1
+    fi
+
+    log_info "_sa_write_valid_key_basenames_to_file: Finding private key files in $SSH_DIR and writing basenames to '$target_file'..."
+
+    local filename # Basename of the potential private key
+    local pub_filepath
+    local key_full_path
+
+    # Ensure the directory for the target file exists
+    local target_dir
+    target_dir=$(dirname "$target_file")
+    if [ ! -d "$target_dir" ]; then
+        log_debug "_sa_write_valid_key_basenames_to_file: Creating directory for target file: $target_dir"
+        if ! mkdir -p "$target_dir"; then
+            log_error "_sa_write_valid_key_basenames_to_file: Failed to create directory '$target_dir'. Cannot proceed."
+            set +u # Disable strict mode before returning
+            return 1
+        fi
+        chmod 700 "$target_dir" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_dir"
+    fi
+
+    # Find potential private keys (files not ending in .pub)
+    # Process substitution <(...) reads the output of the find command line by line
+    log_debug "_sa_write_valid_key_basenames_to_file: Finding candidate files (excluding .pub)..."
+    local valid_key_basenames=() # Array to hold basenames
+    while IFS= read -r filename || [ -n "$filename" ]; do
+        [ -z "$filename" ] && continue # Skip empty lines
+
+        log_debug "_sa_write_valid_key_basenames_to_file: Checking candidate: $filename"
+        pub_filepath="$SSH_DIR/${filename}.pub"
+        key_full_path="$SSH_DIR/$filename" # Still need this to check private key exists
+
+        # Check if the corresponding .pub file exists and the private key file itself exists
+        if [ -f "$pub_filepath" ]; then
+            log_debug "_sa_write_valid_key_basenames_to_file:   Found matching pair: ${filename}.pub. Adding basename '$filename' to list."
+            # Append basename to the array
+            valid_key_basenames+=("$filename")
+        else
+            log_debug "_sa_write_valid_key_basenames_to_file:   No matching .pub file found at '$pub_filepath'. Skipping."
+        fi
+    # Use find to get basenames of files not ending in .pub
+    # Ensure find operates directly in SSH_DIR to avoid path issues with basename
+    done < <(find "$SSH_DIR" -maxdepth 1 -type f ! -name '*.pub' -exec basename {} \;)
+
+    log_debug "_sa_write_valid_key_basenames_to_file: Finished checking candidates."
+
+    if [ ${#valid_key_basenames[@]} -eq 0 ]; then
+        log_info "_sa_write_valid_key_basenames_to_file: No private keys with corresponding .pub files found in $SSH_DIR. Clearing target file."
+        # Clear the target file even if no keys are found
+        if ! :> "$target_file"; then # Using :> for truncation, safer than > potentially
+             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
+             set +u # Disable strict mode before returning
+             return 1
+        fi
+        chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
+        set +u # Disable strict mode before returning
+        return 1 # Indicate failure if no valid keys found
+    else
+        log_info "_sa_write_valid_key_basenames_to_file: Found ${#valid_key_basenames[@]} private key file(s). Writing to '$target_file'..."
+
+        # Clear the target file first
+        if ! :> "$target_file"; then
+             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
+             set +u # Disable strict mode before returning
+             return 1
+        fi
+        chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
+
+        # Write the array elements one per line to the file
+        local basename
+        for basename in "${valid_key_basenames[@]}"; do
+            echo "$basename" >> "$target_file"
+            if [ $? -ne 0 ]; then
+                log_error "_sa_write_valid_key_basenames_to_file: Failed to write basename '$basename' to '$target_file'."
+                # Optionally decide whether to abort or continue
+                set +u # Disable strict mode before returning
+                return 1 # Abort on first write error
+            fi
+        done
+        log_info "_sa_write_valid_key_basenames_to_file: Successfully wrote ${#valid_key_basenames[@]} basenames to '$target_file'."
+        set +u # Disable strict mode before returning
+        return 0 # Success
+    fi
+} # END _sa_write_valid_key_basenames_to_file
+
+# Function: _sa_check_ssh_agent
+# Purpose: Checks if the currently set SSH_AUTH_SOCK and SSH_AGENT_PID environment
+#          variables point to a live and accessible ssh-agent process.
+#
+# Inputs:
+#   - Environment Variables: SSH_AUTH_SOCK, SSH_AGENT_PID (uses default expansion `${VAR:-}`)
+#
+# Outputs:
+#   - Return Value: 0 if the agent is running and accessible, 1 otherwise.
+#   - Log Output: Debug/Error messages indicating check status.
+#
+# Core Logic:
+#   1. Checks if SSH_AUTH_SOCK and SSH_AGENT_PID are non-empty.
+#   2. Checks if SSH_AUTH_SOCK points to an existing socket file (`-S`).
+#   3. Checks if SSH_AGENT_PID corresponds to a running process (`ps -p`).
+#   4. Attempts communication using `ssh-add -l`. Status 0 (keys exist) or 1 (no keys)
+#      are considered successful communication. Status 2 or higher indicates failure.
 _sa_check_ssh_agent() {
     set -u # Enable strict mode for this function
 
@@ -252,12 +465,39 @@ _sa_check_ssh_agent() {
     log_error "_sa_check_ssh_agent: Cannot communicate with agent (ssh-add -l status $check_status)."
     set +u # Disable strict mode before returning
     return 1 # Failure
-}
+} # END _sa_check_ssh_agent
 
-# Function: _sa_ensure_ssh_agent (Internal version)
-# Description: Ensures agent is running and variables exported. Silent.
-# Input: None
-# Output: Exports SSH_AUTH_SOCK, SSH_AGENT_PID. Returns 0 on success, 1 on failure.
+# Function: _sa_ensure_ssh_agent
+# Purpose: Ensures a valid ssh-agent is running and its environment variables
+#          (SSH_AUTH_SOCK, SSH_AGENT_PID) are exported in the current shell scope.
+#          It prioritizes reusing an existing agent found via environment variables
+#          or the persistent agent environment file.
+#
+# Inputs:
+#   - Global Variables: AGENT_ENV_FILE, SSH_DIR
+#   - Environment Variables: Checks existing SSH_AUTH_SOCK, SSH_AGENT_PID.
+#
+# Outputs:
+#   - Exports: Exports SSH_AUTH_SOCK and SSH_AGENT_PID into the current shell environment.
+#   - Files Modified: Creates/overwrites AGENT_ENV_FILE with new agent details if a new agent is started.
+#                    Removes AGENT_ENV_FILE if it points to a stale/invalid agent.
+#   - Return Value: 0 on success (agent running and vars exported), 1 on failure.
+#
+# Core Logic:
+#   1. Check Current Environment: If SSH_AUTH_SOCK/PID are set and `_sa_check_ssh_agent` passes, export them and return success.
+#   2. Check Persistent File: If AGENT_ENV_FILE exists:
+#      a. Unset current SSH_AUTH_SOCK/PID.
+#      b. Source AGENT_ENV_FILE.
+#      c. If `_sa_check_ssh_agent` passes, export the sourced variables and return success.
+#      d. If check fails, remove the stale AGENT_ENV_FILE and unset the variables.
+#   3. Start New Agent: If no valid agent found yet:
+#      a. Ensure $SSH_DIR exists.
+#      b. Execute `ssh-agent -s` to start a new agent and capture its output.
+#      c. Parse the output using `sed` to extract the new socket and PID.
+#      d. Export the new SSH_AUTH_SOCK and SSH_AGENT_PID variables.
+#      e. Write the export commands for the new variables to AGENT_ENV_FILE.
+#      f. Perform a final verification using `_sa_check_ssh_agent`.
+#      g. Return success (0) or failure (1) based on verification.
 _sa_ensure_ssh_agent() {
     set -u # Enable strict mode for this function
 
@@ -361,93 +601,37 @@ _sa_ensure_ssh_agent() {
         set +u # Disable strict mode before returning
         return 1 # Failure!
     fi
-}
+} # END _sa_ensure_ssh_agent
 
-# Function: _sa_update_keys_list_file (Internal version)
-# Description: Finds private keys by checking for corresponding .pub files and saves to VALID_KEY_LIST_FILE.
-# Input: Uses SSH_DIR, VALID_KEY_LIST_FILE
-# Output: Populates VALID_KEY_LIST_FILE. Returns 0 if valid keys found, 1 otherwise.
-_sa_update_keys_list_file() {
-    log_debug "_sa_update_keys_list_file: Entering function (pair matching logic)."
-    log_info "_sa_update_keys_list_file: Finding private key files in $SSH_DIR by checking for corresponding .pub files..."
-
-    # Ensure the directory for the key list file exists
-    local key_list_dir
-    key_list_dir=$(dirname "$VALID_KEY_LIST_FILE")
-    if [ ! -d "$key_list_dir" ]; then
-        log_debug "_sa_update_keys_list_file: Creating directory for key list file: $key_list_dir"
-        if ! mkdir -p "$key_list_dir"; then
-            log_error "_sa_update_keys_list_file: Failed to create directory '$key_list_dir'. Cannot proceed."
-            return 1
-        fi
-        # Optionally set permissions, although mkdir -p usually does the right thing
-        chmod 700 "$key_list_dir" 2>/dev/null || log_warn "_sa_update_keys_list_file: Could not set permissions on $key_list_dir"
-    fi
-
-    # Ensure the target list file is usable (create if doesn't exist)
-    if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
-         log_error "_sa_update_keys_list_file: Cannot create or touch key list file '$VALID_KEY_LIST_FILE'. Check permissions."
-         return 1
-    fi
-    chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "_sa_update_keys_list_file: Could not set permissions on $VALID_KEY_LIST_FILE"
-
-    # Clear the key list file using truncate or echo -n
-    log_debug "_sa_update_keys_list_file: Clearing key list file: $VALID_KEY_LIST_FILE"
-    if command -v truncate > /dev/null; then
-        log_debug "_sa_update_keys_list_file: Using 'truncate' command."
-        truncate -s 0 "$VALID_KEY_LIST_FILE"
-    else
-        log_debug "_sa_update_keys_list_file: 'truncate' not found, using 'echo -n'."
-        echo -n > "$VALID_KEY_LIST_FILE"
-    fi
-    local clear_status=$?
-    if [ $clear_status -ne 0 ]; then
-        log_error "_sa_update_keys_list_file: Failed to clear key list file '$VALID_KEY_LIST_FILE' (status: $clear_status)."
-        return 1
-    fi
-
-    local filename # Basename of the potential private key
-    local pub_filepath
-    local valid_key_count=0
-
-    # Find potential private keys (files not ending in .pub)
-    # Use -exec basename {} \; for portability between Linux/macOS
-    # Process substitution <(...) reads the output of the find command line by line
-    log_debug "_sa_update_keys_list_file: Finding candidate files (excluding .pub)..."
-    while IFS= read -r filename || [ -n "$filename" ]; do
-        [ -z "$filename" ] && continue # Skip empty lines
-
-        log_debug "_sa_update_keys_list_file: Checking candidate: $filename"
-        pub_filepath="$SSH_DIR/${filename}.pub"
-
-        # Check if the corresponding .pub file exists
-        if [ -f "$pub_filepath" ]; then
-            log_debug "_sa_update_keys_list_file:   Found matching pair: ${filename}.pub. Adding '$filename' to list."
-            # Append filename to the list file
-            echo "$filename" >> "$VALID_KEY_LIST_FILE"
-            ((valid_key_count++))
-        else
-            log_debug "_sa_update_keys_list_file:   No matching .pub file found at '$pub_filepath'. Skipping."
-        fi
-    # Use find to get basenames of files not ending in .pub
-    # Ensure find operates directly in SSH_DIR to avoid path issues with basename
-    done < <(find "$SSH_DIR" -maxdepth 1 -type f ! -name '*.pub' -exec basename {} \;)
-
-    log_debug "_sa_update_keys_list_file: Finished checking candidates."
-
-    if [ "$valid_key_count" -eq 0 ]; then
-        log_info "_sa_update_keys_list_file: No private keys with corresponding .pub files found in $SSH_DIR"
-        return 1 # Indicate failure if no valid keys found
-    else
-        log_info "_sa_update_keys_list_file: Found $valid_key_count private key file(s) with matching .pub files in $SSH_DIR"
-        return 0 # Success
-    fi
-}
-
-# Function: _sa_add_keys_to_agent (Internal version)
-# Description: Adds keys listed in VALID_KEY_LIST_FILE to the agent using a single ssh-add call. Silent.
-# Input: Uses SSH_DIR, VALID_KEY_LIST_FILE
-# Output: Returns 0 on success (even if some keys failed but agent call succeeded), 1 on major failure.
+# Function: _sa_add_keys_to_agent
+# Purpose: Reads a list of key *basenames* from the VALID_KEY_LIST_FILE,
+#          constructs their full paths, and attempts to add them to the
+#          currently running ssh-agent using a single `ssh-add` command.
+#
+# Inputs:
+#   - Global Variables: VALID_KEY_LIST_FILE, SSH_DIR
+#
+# Outputs:
+#   - Agent State: Adds keys to the ssh-agent.
+#   - Return Value: 0 if `ssh-add` call succeeded (status 0 or 1), 1 if `ssh-add` failed critically (status 2+).
+#                 Returns 1 immediately if key list file is empty or no valid paths found.
+#   - Log Output: Info/Warn/Error messages about the process.
+#
+# Core Logic:
+#   1. Checks if VALID_KEY_LIST_FILE exists and is non-empty.
+#   2. Reads each line (key basename) from VALID_KEY_LIST_FILE.
+#   3. Constructs the full path ($SSH_DIR/$basename).
+#   4. Checks if the full path points to an existing file.
+#   5. Adds valid full paths to the `key_paths_to_add` array.
+#   6. If no valid paths are found, returns 1.
+#   7. Builds the `ssh-add` command array.
+#   8. Adds `--apple-use-keychain` on Darwin.
+#   9. Appends all valid key paths to the command array.
+#  10. Executes the `ssh-add` command with all keys at once.
+#  11. Checks the exit status of `ssh-add`:
+#      - 0 (Success): Returns 0.
+#      - 1 (Partial failure, likely passphrases needed): Logs warning, returns 0 (treated as OK for setup).
+#      - 2+ (Connection error or other failure): Logs error, returns 1.
 _sa_add_keys_to_agent() {
     set -u # Enable strict mode for this function
 
@@ -528,115 +712,45 @@ _sa_add_keys_to_agent() {
         set +u # Disable strict mode before returning
         return 1 # Major failure
     fi
-}
+} # END _sa_add_keys_to_agent
 
-# Function: _sa_write_valid_key_basenames_to_file (Internal version)
-# Description: Finds private keys by checking for corresponding .pub files and writes their basenames (one per line) to the specified file.
-# Input: Uses SSH_DIR
-# Argument $1: target_file - The file to write the basenames into.
-# Output: Writes to the target file. Returns 0 if keys found and written, 1 otherwise.
-_sa_write_valid_key_basenames_to_file() {
-    set -u # Enable strict mode for this function
+# --- Main Setup Function ---
+# This function orchestrates the primary setup process when the script is sourced.
 
-    local target_file="$1"
-    log_debug "_sa_write_valid_key_basenames_to_file: Entering function. Target file: '$target_file'"
-
-    if [ -z "$target_file" ]; then
-        log_error "_sa_write_valid_key_basenames_to_file: No target file specified."
-        set +u # Disable strict mode before returning
-        return 1
-    fi
-
-    log_info "_sa_write_valid_key_basenames_to_file: Finding private key files in $SSH_DIR and writing basenames to '$target_file'..."
-
-    local filename # Basename of the potential private key
-    local pub_filepath
-    local key_full_path
-
-    # Ensure the directory for the target file exists
-    local target_dir
-    target_dir=$(dirname "$target_file")
-    if [ ! -d "$target_dir" ]; then
-        log_debug "_sa_write_valid_key_basenames_to_file: Creating directory for target file: $target_dir"
-        if ! mkdir -p "$target_dir"; then
-            log_error "_sa_write_valid_key_basenames_to_file: Failed to create directory '$target_dir'. Cannot proceed."
-            set +u # Disable strict mode before returning
-            return 1
-        fi
-        chmod 700 "$target_dir" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_dir"
-    fi
-
-    # Find potential private keys (files not ending in .pub)
-    # Process substitution <(...) reads the output of the find command line by line
-    log_debug "_sa_write_valid_key_basenames_to_file: Finding candidate files (excluding .pub)..."
-    local valid_key_basenames=() # Array to hold basenames
-    while IFS= read -r filename || [ -n "$filename" ]; do
-        [ -z "$filename" ] && continue # Skip empty lines
-
-        log_debug "_sa_write_valid_key_basenames_to_file: Checking candidate: $filename"
-        pub_filepath="$SSH_DIR/${filename}.pub"
-        key_full_path="$SSH_DIR/$filename" # Still need this to check private key exists
-
-        # Check if the corresponding .pub file exists and the private key file itself exists
-        if [ -f "$pub_filepath" ]; then
-            log_debug "_sa_write_valid_key_basenames_to_file:   Found matching pair: ${filename}.pub. Adding basename '$filename' to list."
-            # Append basename to the array
-            valid_key_basenames+=("$filename")
-        else
-            log_debug "_sa_write_valid_key_basenames_to_file:   No matching .pub file found at '$pub_filepath'. Skipping."
-        fi
-    # Use find to get basenames of files not ending in .pub
-    # Ensure find operates directly in SSH_DIR to avoid path issues with basename
-    done < <(find "$SSH_DIR" -maxdepth 1 -type f ! -name '*.pub' -exec basename {} \;)
-
-    log_debug "_sa_write_valid_key_basenames_to_file: Finished checking candidates."
-
-    if [ ${#valid_key_basenames[@]} -eq 0 ]; then
-        log_info "_sa_write_valid_key_basenames_to_file: No private keys with corresponding .pub files found in $SSH_DIR. Clearing target file."
-        # Clear the target file even if no keys are found
-        if ! :> "$target_file"; then # Using :> for truncation, safer than > potentially
-             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
-             set +u # Disable strict mode before returning
-             return 1
-        fi
-        chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
-        set +u # Disable strict mode before returning
-        return 1 # Indicate failure if no valid keys found
-    else
-        log_info "_sa_write_valid_key_basenames_to_file: Found ${#valid_key_basenames[@]} private key file(s). Writing to '$target_file'..."
-
-        # Clear the target file first
-        if ! :> "$target_file"; then
-             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
-             set +u # Disable strict mode before returning
-             return 1
-        fi
-        chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
-
-        # Write the array elements one per line to the file
-        local basename
-        for basename in "${valid_key_basenames[@]}"; do
-            echo "$basename" >> "$target_file"
-            if [ $? -ne 0 ]; then
-                log_error "_sa_write_valid_key_basenames_to_file: Failed to write basename '$basename' to '$target_file'."
-                # Optionally decide whether to abort or continue
-                set +u # Disable strict mode before returning
-                return 1 # Abort on first write error
-            fi
-        done
-        log_info "_sa_write_valid_key_basenames_to_file: Successfully wrote ${#valid_key_basenames[@]} basenames to '$target_file'."
-        set +u # Disable strict mode before returning
-        return 0 # Success
-    fi
-}
-
-# --- Traps ---
-# Cleanup trap (currently does nothing for persistent list file)
-trap '_sa_cleanup' EXIT
-# Trap to log execution time (removed - called explicitly now)
-
-# --- Main Execution Logic (now encapsulated in a function) ---
-
+# Function: sa_setup
+# Purpose: Main entry point for the SSH agent setup process. Handles argument parsing,
+#          ensures the agent is running, determines how to load keys (scan or file),
+#          populates the list of keys, checks if keys need loading, loads them if necessary,
+#          and logs execution time.
+#
+# Inputs:
+#   - Arguments: Optionally accepts `-v` or `--verbose` for debug logging,
+#                followed by an optional filename containing a list of key names to load.
+#   - Global Variables: Uses SSH_DIR, VALID_KEY_LIST_FILE, and modifies _sa_IS_VERBOSE.
+#   - Environment Variables: Relies on `_sa_ensure_ssh_agent` to set SSH_AUTH_SOCK/PID.
+#
+# Outputs:
+#   - Agent State: Ensures agent is running and potentially adds keys.
+#   - Environment Variables: Exports SSH_AUTH_SOCK, SSH_AGENT_PID via `_sa_ensure_ssh_agent`.
+#   - Files Modified: Populates VALID_KEY_LIST_FILE (either from scan or file input).
+#   - Return Value: 0 on success (agent is running), 1 on failure (agent setup failed).
+#                    Key loading issues do not cause a failure return code.
+#
+# Core Logic:
+#   1. Enables `set -u` locally for robustness.
+#   2. Parses arguments to check for verbose flag (`-v`/`--verbose`) and sets `_sa_IS_VERBOSE`.
+#   3. Calls `_sa_ensure_ssh_agent` to start/reuse agent and export variables. Exits on failure.
+#   4. Determines key loading method (`scan` or `file`) based on remaining arguments.
+#   5. If method is `file`, validates the input file and copies its contents (basenames)
+#      to VALID_KEY_LIST_FILE.
+#   6. If method is `scan`, calls `_sa_write_valid_key_basenames_to_file` to populate
+#      VALID_KEY_LIST_FILE by scanning $SSH_DIR.
+#   7. Checks if VALID_KEY_LIST_FILE is usable.
+#   8. Compares key count in agent (`ssh-add -l`) with count in VALID_KEY_LIST_FILE.
+#   9. If counts differ or agent check failed, calls `_sa_add_keys_to_agent`.
+#  10. If counts match, skips calling `_sa_add_keys_to_agent`.
+#  11. Calls `_sa_log_execution_time`.
+#  12. Disables `set -u` and returns status.
 sa_setup() {
     set -u # Enable strict mode for this function
 
@@ -780,8 +894,8 @@ sa_setup() {
     log_debug "sa_setup: Setup complete."
     set +u # Disable strict mode before returning
     return 0 # Indicate success from setup function
-}
+} # END sa_setup
 
-# --- Auto-execution Trigger ---
+# --- Auto-Execution Trigger ---
 # Call the main setup function, passing any arguments provided during sourcing.
 sa_setup "$@" 
