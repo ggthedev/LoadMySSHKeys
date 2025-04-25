@@ -185,12 +185,12 @@ _sa_check_ssh_agent() {
 }
 
 # Function: _sa_update_keys_list_file (Internal version)
-# Description: Finds VALID private key files using ssh-keygen and saves to VALID_KEY_LIST_FILE.
+# Description: Finds private keys by checking for corresponding .pub files and saves to VALID_KEY_LIST_FILE.
 # Input: Uses SSH_DIR, VALID_KEY_LIST_FILE
 # Output: Populates VALID_KEY_LIST_FILE. Returns 0 if valid keys found, 1 otherwise.
 _sa_update_keys_list_file() {
-    log_debug "_sa_update_keys_list_file: Entering function."
-    log_info "_sa_update_keys_list_file: Finding and validating private key files in $SSH_DIR..."
+    log_debug "_sa_update_keys_list_file: Entering function (pair matching logic)."
+    log_info "_sa_update_keys_list_file: Finding private key files by checking for .pub pairs in $SSH_DIR..."
 
     # Ensure the target list file is usable (create if doesn't exist)
     if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
@@ -214,57 +214,39 @@ _sa_update_keys_list_file() {
         return 1
     fi
 
-    local platform
-    platform=$(uname -s)
-    local uname_status=$?
-    if [ $uname_status -ne 0 ]; then
-        log_error "_sa_update_keys_list_file: 'uname -s' command failed with status $uname_status."
-        return 1
-    fi
-    log_debug "_sa_update_keys_list_file: Platform detected: $platform"
-
-    local candidate_files=()
-    local filename
-    local key_path
+    local filename # Basename of the potential private key
+    local pub_filepath
     local valid_key_count=0
 
-    # Find potential candidate files first (basic exclusions)
-    log_debug "_sa_update_keys_list_file: Finding candidate files..."
-    # Use process substitution and mapfile/read loop for safety
-    local find_cmd=(
-        find "$SSH_DIR" -maxdepth 1 -type f \
-        ! -name '*.pub' \
-        ! -name 'known_hosts*' \
-        ! -name 'authorized_keys*' \
-        ! -name 'config' \
-        ! -name '.*' # Exclude hidden files like .DS_Store, .sshkey-cache, agent.env
-        ! -name '*.txt' # Exclude text files
-    )
+    # Find potential private keys (files not ending in .pub)
+    # Use -exec basename {} \; for portability between Linux/macOS
+    log_debug "_sa_update_keys_list_file: Finding candidate files (excluding .pub)..."
 
-    # Read find output line by line
-    while IFS= read -r key_path || [ -n "$key_path" ]; do
-        [ -z "$key_path" ] && continue # Skip empty lines just in case
-        filename=$(basename "$key_path")
+    # Use process substitution for reading find output safely
+    while IFS= read -r filename || [ -n "$filename" ]; do
+        [ -z "$filename" ] && continue # Skip empty lines
+
         log_debug "_sa_update_keys_list_file: Checking candidate: $filename"
+        pub_filepath="$SSH_DIR/${filename}.pub"
 
-        # Validate using ssh-keygen -y (extract public key)
-        if ssh-keygen -y -f "$key_path" >/dev/null 2>&1; then
-            log_debug "_sa_update_keys_list_file:   VALID key found: $filename. Adding to list."
-            # Append filename to the temp file
+        # Check if the corresponding .pub file exists
+        if [ -f "$pub_filepath" ]; then
+            log_debug "_sa_update_keys_list_file:   Found matching pair: ${filename}.pub. Adding '$filename' to list."
+            # Append filename to the list file
             echo "$filename" >> "$VALID_KEY_LIST_FILE"
             ((valid_key_count++))
         else
-            log_debug "_sa_update_keys_list_file:   INVALID key file (or passphrase protected?): $filename. Skipping."
+            log_debug "_sa_update_keys_list_file:   No matching .pub file found at '$pub_filepath'. Skipping."
         fi
-    done < <( "${find_cmd[@]}" )
+    done < <(find "$SSH_DIR" -maxdepth 1 -type f ! -name '*.pub' -exec basename {} \;)
 
     log_debug "_sa_update_keys_list_file: Finished checking candidates."
 
     if [ "$valid_key_count" -eq 0 ]; then
-        log_info "_sa_update_keys_list_file: No valid, non-passphrase protected SSH key files found in $SSH_DIR"
+        log_info "_sa_update_keys_list_file: No private keys with corresponding .pub files found in $SSH_DIR"
         return 1 # Indicate failure if no valid keys found
     else
-        log_info "_sa_update_keys_list_file: Found $valid_key_count valid SSH key file(s) in $SSH_DIR"
+        log_info "_sa_update_keys_list_file: Found $valid_key_count private key file(s) with matching .pub files in $SSH_DIR"
         return 0 # Success
     fi
 }
