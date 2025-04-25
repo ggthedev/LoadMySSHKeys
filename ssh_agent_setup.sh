@@ -1,0 +1,513 @@
+#!/usr/bin/env bash
+#
+# SSH Agent Setup Script (for sourcing in .zshrc/.zshenv)
+# ------------------------------------------------------
+# Ensures a single ssh-agent is running per session and exports
+# the necessary environment variables (SSH_AUTH_SOCK, SSH_AGENT_PID).
+# Reuses existing agents via ~/.ssh/agent.env if possible.
+# Loads keys into the agent, either by scanning the SSH directory or
+# from an optional filename argument provided during sourcing.
+#
+# Designed to be sourced:
+#   `source /path/to/ssh_agent_setup.sh`
+#   `source /path/to/ssh_agent_setup.sh /path/to/my_keys.txt`
+#
+# Behavior:
+# - Silent by default.
+# - Checks if SSH_AUTH_SOCK/SSH_AGENT_PID are already set and valid; if so, exits.
+# - Tries to source ~/.ssh/agent.env and validate that agent.
+# - If no valid agent found, starts a new one and saves details to ~/.ssh/agent.env.
+# - If sourced *without* an argument, scans $SSH_DIR for valid private keys
+#   (using ssh-keygen -y) and attempts to load them.
+# - If sourced *with* a readable filename as an argument, attempts to load
+#   the key names listed in that file (one per line, # comments ignored).
+# - Uses `return` instead of `exit`.
+#
+# Key Loading Notes:
+# - On macOS, uses --apple-use-keychain to avoid passphrase prompts if possible.
+# - Keys requiring passphrases not in Keychain will likely fail to load silently.
+#
+# Logging:
+# - Logging is OFF by default.
+# - To enable debug logging, set the environment variable:
+#   `export SSH_AGENT_SETUP_LOG=~/.ssh/agent_setup.log`
+#   BEFORE sourcing this script.
+
+# Treat unset variables as errors
+set -u
+
+# --- Configuration ---
+declare SSH_DIR="$HOME/.ssh"
+declare AGENT_ENV_FILE="$SSH_DIR/agent.env"
+# Persistent file within SSH_DIR to cache the list of valid key filenames
+declare VALID_KEY_LIST_FILE="$SSH_DIR/.ssh_agent_setup_valid_keys"
+
+# Temporary file for listing keys (needed for load-all)
+declare KEYS_LIST_TMP=""
+
+# --- Cleanup trap --- Ensure temp file is removed on exit/error
+trap '_sa_cleanup' EXIT
+
+# Cleanup function for trap
+_sa_cleanup() {
+  if [ -n "$KEYS_LIST_TMP" ] && [ -f "$KEYS_LIST_TMP" ]; then
+    log_debug "_sa_cleanup: Removing temporary file $KEYS_LIST_TMP"
+    rm -f "$KEYS_LIST_TMP"
+  fi
+}
+
+# --- Logging Setup ---
+declare LOG_FILE="/dev/null" # Default: No logging unless path is determined
+
+_setup_default_logging() {
+    local target_log_path
+    local log_dir
+    local platform
+
+    platform=$(uname -s)
+
+    # Determine platform-specific default log path
+    case "$platform" in
+        "Darwin")
+            target_log_path="$HOME/Library/Logs/ssh_agent_setup/agent_setup.log"
+            ;;
+        "Linux")
+            # Prefer /var/log if writable, else use ~/.local
+            if [ -w "/var/log" ]; then
+                target_log_path="/var/log/ssh_agent_setup/agent_setup.log"
+            else
+                target_log_path="$HOME/.local/log/ssh_agent_setup/agent_setup.log"
+            fi
+            ;;
+        *)
+            # Fallback for other systems
+            target_log_path="$HOME/.ssh/logs/agent_setup.log"
+            ;;
+    esac
+
+    log_dir=$(dirname "$target_log_path")
+
+    # Attempt to create directory and file
+    if ! mkdir -p "$log_dir" 2>/dev/null; then
+        # Cannot create directory, logging remains disabled
+        return 1
+    fi
+    if ! touch "$target_log_path" 2>/dev/null; then
+        # Cannot create file, logging remains disabled
+        return 1
+    fi
+
+    # Set log file path and permissions if successful
+    LOG_FILE="$target_log_path"
+    chmod 600 "$LOG_FILE" 2>/dev/null || true # Best effort on chmod
+    return 0
+}
+
+# Check if logging is explicitly enabled via environment variable
+if [ -n "${SSH_AGENT_SETUP_LOG:-}" ]; then
+    log_dir=$(dirname "$SSH_AGENT_SETUP_LOG")
+    if mkdir -p "$log_dir" 2>/dev/null && touch "$SSH_AGENT_SETUP_LOG" 2>/dev/null; then
+        LOG_FILE="$SSH_AGENT_SETUP_LOG"
+        chmod 600 "$LOG_FILE" 2>/dev/null || true
+    else
+        # Explicit path given but failed to create, keep LOG_FILE=/dev/null
+        # Optionally print a warning to stderr if this script were interactive
+        : # No output for sourced script
+    fi
+else
+    # Environment variable not set, try setting up default logging
+    if ! _setup_default_logging; then
+         # Default setup failed, LOG_FILE remains /dev/null
+         : # No output for sourced script
+    fi
+fi
+
+# --- Logging Functions (Conditional) ---
+_log_base() {
+    # Only log if LOG_FILE is not /dev/null
+    [ "$LOG_FILE" = "/dev/null" ] && return 0
+    local type="$1"
+    local msg="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    # Use printf for safer handling of potentially weird characters in msg
+    printf "%s - %s - %s - %s
+" "$timestamp" "$$" "$type" "$msg" >> "$LOG_FILE"
+}
+log_info() { _log_base "INFO" "$1"; }
+log_error() { _log_base "ERROR" "$1"; }
+log_warn() { _log_base "WARN" "$1"; }
+log_debug() { _log_base "DEBUG" "$1"; }
+
+# --- Core Agent Functions (Adapted from loadSSHKEYS.sh) ---
+
+# Function: _sa_check_ssh_agent (Internal version)
+# Description: Checks if SSH_AUTH_SOCK/SSH_AGENT_PID point to a live agent.
+# Input: Uses exported SSH_AUTH_SOCK, SSH_AGENT_PID
+# Output: 0 if agent is accessible, 1 otherwise.
+_sa_check_ssh_agent() {
+    log_debug "_sa_check_ssh_agent: Checking agent status... (PID='${SSH_AGENT_PID:-}', SOCK='${SSH_AUTH_SOCK:-}')"
+    if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
+        log_debug "_sa_check_ssh_agent: Required environment variables not set."
+        return 1
+    fi
+    if [ ! -S "$SSH_AUTH_SOCK" ]; then
+        log_error "_sa_check_ssh_agent: SSH_AUTH_SOCK is not a socket: $SSH_AUTH_SOCK"
+        return 1
+    fi
+    if ! ps -p "$SSH_AGENT_PID" > /dev/null 2>&1; then
+        log_error "_sa_check_ssh_agent: SSH_AGENT_PID ($SSH_AGENT_PID) process not running."
+        return 1
+    fi
+    # Use ssh-add -l to check communication, allow status 1 (no keys)
+    ssh-add -l > /dev/null 2>&1 || true
+    local check_status=${PIPESTATUS[0]:-$?}
+    log_debug "_sa_check_ssh_agent: ssh-add -l communication status: $check_status"
+    if [ "$check_status" -eq 0 ] || [ "$check_status" -eq 1 ]; then
+        log_debug "_sa_check_ssh_agent: Agent communication successful (status $check_status)."
+        return 0 # Success
+    fi
+    log_error "_sa_check_ssh_agent: Cannot communicate with agent (ssh-add -l status $check_status)."
+    return 1 # Failure
+}
+
+# Function: _sa_update_keys_list_file (Internal version)
+# Description: Finds VALID private key files using ssh-keygen and saves to VALID_KEY_LIST_FILE.
+# Input: Uses SSH_DIR, VALID_KEY_LIST_FILE
+# Output: Populates VALID_KEY_LIST_FILE. Returns 0 if valid keys found, 1 otherwise.
+_sa_update_keys_list_file() {
+    log_debug "_sa_update_keys_list_file: Entering function."
+    log_info "_sa_update_keys_list_file: Finding and validating private key files in $SSH_DIR..."
+
+    # Ensure the target list file is usable (create if doesn't exist)
+    if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
+         log_error "_sa_update_keys_list_file: Cannot create or touch key list file '$VALID_KEY_LIST_FILE'. Check permissions."
+         return 1
+    fi
+    chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "_sa_update_keys_list_file: Could not set permissions on $VALID_KEY_LIST_FILE"
+
+    # Clear the key list file using truncate or echo -n
+    log_debug "_sa_update_keys_list_file: Clearing key list file: $VALID_KEY_LIST_FILE"
+    if command -v truncate > /dev/null; then
+        log_debug "_sa_update_keys_list_file: Using 'truncate' command."
+        truncate -s 0 "$VALID_KEY_LIST_FILE"
+    else
+        log_debug "_sa_update_keys_list_file: 'truncate' not found, using 'echo -n'."
+        echo -n > "$VALID_KEY_LIST_FILE"
+    fi
+    local clear_status=$?
+    if [ $clear_status -ne 0 ]; then
+        log_error "_sa_update_keys_list_file: Failed to clear key list file '$VALID_KEY_LIST_FILE' (status: $clear_status)."
+        return 1
+    fi
+
+    local platform
+    platform=$(uname -s)
+    local uname_status=$?
+    if [ $uname_status -ne 0 ]; then
+        log_error "_sa_update_keys_list_file: 'uname -s' command failed with status $uname_status."
+        return 1
+    fi
+    log_debug "_sa_update_keys_list_file: Platform detected: $platform"
+
+    local candidate_files=()
+    local filename
+    local key_path
+    local valid_key_count=0
+
+    # Find potential candidate files first (basic exclusions)
+    log_debug "_sa_update_keys_list_file: Finding candidate files..."
+    # Use process substitution and mapfile/read loop for safety
+    local find_cmd=(
+        find "$SSH_DIR" -maxdepth 1 -type f \
+        ! -name '*.pub' \
+        ! -name 'known_hosts*' \
+        ! -name 'authorized_keys*' \
+        ! -name 'config' \
+        ! -name '.*' # Exclude hidden files like .DS_Store, .sshkey-cache, agent.env
+        ! -name '*.txt' # Exclude text files
+    )
+
+    # Read find output line by line
+    while IFS= read -r key_path || [ -n "$key_path" ]; do
+        [ -z "$key_path" ] && continue # Skip empty lines just in case
+        filename=$(basename "$key_path")
+        log_debug "_sa_update_keys_list_file: Checking candidate: $filename"
+
+        # Validate using ssh-keygen -y (extract public key)
+        if ssh-keygen -y -f "$key_path" >/dev/null 2>&1; then
+            log_debug "_sa_update_keys_list_file:   VALID key found: $filename. Adding to list."
+            # Append filename to the temp file
+            echo "$filename" >> "$VALID_KEY_LIST_FILE"
+            ((valid_key_count++))
+        else
+            log_debug "_sa_update_keys_list_file:   INVALID key file (or passphrase protected?): $filename. Skipping."
+        fi
+    done < <( "${find_cmd[@]}" )
+
+    log_debug "_sa_update_keys_list_file: Finished checking candidates."
+
+    if [ "$valid_key_count" -eq 0 ]; then
+        log_info "_sa_update_keys_list_file: No valid, non-passphrase protected SSH key files found in $SSH_DIR"
+        return 1 # Indicate failure if no valid keys found
+    else
+        log_info "_sa_update_keys_list_file: Found $valid_key_count valid SSH key file(s) in $SSH_DIR"
+        return 0 # Success
+    fi
+}
+
+# Function: _sa_add_keys_to_agent (Internal version)
+# Description: Adds keys listed in VALID_KEY_LIST_FILE to the agent. Silent.
+# Input: Uses SSH_DIR, VALID_KEY_LIST_FILE
+# Output: Returns 0 if at least one key added successfully, 1 otherwise.
+_sa_add_keys_to_agent() {
+    log_debug "_sa_add_keys_to_agent: Entering function."
+    log_info "_sa_add_keys_to_agent: Adding keys listed in $VALID_KEY_LIST_FILE to the agent..."
+    local keyfile
+    local key_path
+    local added_count=0
+    local failed_count=0
+    local platform
+    platform=$(uname -s)
+
+    # Check if VALID_KEY_LIST_FILE exists and is non-empty
+    if [ ! -s "$VALID_KEY_LIST_FILE" ]; then
+        log_warn "_sa_add_keys_to_agent: Key list file ($VALID_KEY_LIST_FILE) is empty or does not exist. No keys to add."
+        return 1 # Nothing to add
+    fi
+
+    log_debug "_sa_add_keys_to_agent: Starting loop through keys in $VALID_KEY_LIST_FILE..."
+    while IFS= read -r keyfile || [ -n "$keyfile" ]; do
+        [ -z "$keyfile" ] && continue # Skip empty lines
+        key_path="$SSH_DIR/$keyfile"
+        log_debug "_sa_add_keys_to_agent: Processing key entry: $keyfile (Path: $key_path)"
+
+        if [ -f "$key_path" ]; then
+            log_debug "_sa_add_keys_to_agent: Attempting to add key: $key_path (Platform: $platform)"
+            local ssh_add_status=0
+
+            # Run ssh-add silently, capture status, allow failure
+            if [[ "$platform" == "Darwin" ]]; then
+                ssh-add --apple-use-keychain "$key_path" >/dev/null 2>&1 || true
+                ssh_add_status=${PIPESTATUS[0]:-$?}
+            else
+                ssh-add "$key_path" >/dev/null 2>&1 || true
+                ssh_add_status=${PIPESTATUS[0]:-$?}
+            fi
+            log_debug "_sa_add_keys_to_agent: ssh-add finished for '$key_path' with status: $ssh_add_status"
+
+            if [ $ssh_add_status -eq 0 ]; then
+                log_info "_sa_add_keys_to_agent: Successfully added $keyfile"
+                ((added_count++))
+            else
+                # Log only as warning - could be passphrase needed or invalid key
+                log_warn "_sa_add_keys_to_agent: Failed to add key: $keyfile (status: $ssh_add_status). Check passphrase or key format."
+                ((failed_count++))
+            fi
+        else
+            log_warn "_sa_add_keys_to_agent: Key file '$keyfile' listed but not found at '$key_path'. Skipping."
+            ((failed_count++)) # Count missing files as failures too
+        fi
+    done < "$VALID_KEY_LIST_FILE"
+    log_debug "_sa_add_keys_to_agent: Finished loop through keys."
+    log_info "_sa_add_keys_to_agent: Summary: Added: $added_count, Failed/Skipped: $failed_count"
+
+    # Return 0 if at least one key was added successfully
+    if [ "$added_count" -gt 0 ]; then
+      log_debug "_sa_add_keys_to_agent: Exiting function (status: 0 - keys added)."
+      return 0
+    else
+      log_debug "_sa_add_keys_to_agent: Exiting function (status: 1 - no keys added)."
+      return 1
+    fi
+}
+
+# Function: _sa_ensure_ssh_agent (Internal version)
+# Description: Ensures agent is running and variables exported. Silent.
+# Input: None
+# Output: Exports SSH_AUTH_SOCK, SSH_AGENT_PID. Returns 0 on success, 1 on failure.
+_sa_ensure_ssh_agent() {
+    log_debug "_sa_ensure_ssh_agent: Entering function."
+
+    # 1. Check if already configured and working in this environment
+    log_debug "_sa_ensure_ssh_agent: Checking current environment..."
+    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -n "${SSH_AGENT_PID:-}" ] && _sa_check_ssh_agent; then
+        log_info "_sa_ensure_ssh_agent: Agent already running and sourced (PID: $SSH_AGENT_PID)."
+        # Ensure they are exported, just in case they weren't initially
+        export SSH_AUTH_SOCK SSH_AGENT_PID
+        return 0
+    fi
+    log_debug "_sa_ensure_ssh_agent: Agent not valid in current environment."
+
+    # 2. Try sourcing persistent environment file
+    if [ -f "$AGENT_ENV_FILE" ]; then
+        log_debug "_sa_ensure_ssh_agent: Found persistent file: $AGENT_ENV_FILE. Sourcing..."
+        # Unset potentially stale vars before sourcing
+        unset SSH_AUTH_SOCK SSH_AGENT_PID
+        # Source the file into the current shell's environment
+        # shellcheck disable=SC1090 # File path is from variable
+        . "$AGENT_ENV_FILE" >/dev/null
+        log_debug "_sa_ensure_ssh_agent: Sourced persistent file. Checking agent status again..."
+        if _sa_check_ssh_agent; then
+            log_info "_sa_ensure_ssh_agent: Sourcing persistent file successful. Reusing agent (PID: $SSH_AGENT_PID)."
+            # Ensure they are exported
+            export SSH_AUTH_SOCK SSH_AGENT_PID
+            return 0
+        else
+            log_warn "_sa_ensure_ssh_agent: Persistent file found but agent invalid/inaccessible after sourcing. Removing stale file."
+            rm -f "$AGENT_ENV_FILE" # Remove stale file
+            # Unset potentially incorrect variables sourced from the stale file
+            unset SSH_AUTH_SOCK SSH_AGENT_PID
+        fi
+    else
+        log_debug "_sa_ensure_ssh_agent: No persistent agent file found ($AGENT_ENV_FILE)."
+    fi
+
+    # 3. Start a new agent
+    log_info "_sa_ensure_ssh_agent: Starting new ssh-agent..."
+
+    # Ensure .ssh directory exists
+    if ! mkdir -p "$SSH_DIR" 2>/dev/null; then log_error "_sa_ensure_ssh_agent: Failed to create SSH directory $SSH_DIR"; return 1; fi
+    if ! chmod 700 "$SSH_DIR" 2>/dev/null; then log_warn "_sa_ensure_ssh_agent: Failed to set permissions on $SSH_DIR"; fi
+
+    # Start ssh-agent and capture output
+    local agent_output
+    if ! agent_output=$(ssh-agent -s); then
+        log_error "_sa_ensure_ssh_agent: Failed to execute ssh-agent -s"
+        return 1
+    fi
+    log_debug "_sa_ensure_ssh_agent: ssh-agent -s output captured."
+
+    # Extract environment variables (handle potential variations in output)
+    local new_sock new_pid
+    new_sock=$(echo "$agent_output" | sed -n 's/SSH_AUTH_SOCK=([^;]*);.*//p')
+    new_pid=$(echo "$agent_output" | sed -n 's/SSH_AGENT_PID=([^;]*);.*//p')
+
+    if [ -z "$new_sock" ] || [ -z "$new_pid" ]; then
+        log_error "_sa_ensure_ssh_agent: Failed to extract env vars from output: $agent_output"
+        return 1
+    fi
+    log_debug "_sa_ensure_ssh_agent: Extracted SOCK=$new_sock PID=$new_pid"
+
+    # Export variables into the current shell's environment
+    export SSH_AUTH_SOCK="$new_sock"
+    export SSH_AGENT_PID="$new_pid"
+    log_debug "_sa_ensure_ssh_agent: Exported new agent variables into current scope."
+
+    # Save agent environment variables to persistent file
+    log_debug "_sa_ensure_ssh_agent: Saving agent environment to $AGENT_ENV_FILE"
+    {
+        # Use printf for reliability
+        printf 'SSH_AUTH_SOCK=%s; export SSH_AUTH_SOCK;
+' "$new_sock"
+        printf 'SSH_AGENT_PID=%s; export SSH_AGENT_PID;
+' "$new_pid"
+        printf '# Agent started on %s by %s
+' "$(date)" "$(basename "$0")"
+    } > "$AGENT_ENV_FILE"
+    if ! chmod 600 "$AGENT_ENV_FILE"; then log_warn "_sa_ensure_ssh_agent: Failed to set permissions on $AGENT_ENV_FILE"; fi
+    log_debug "_sa_ensure_ssh_agent: Agent environment saved."
+
+    # Final verification (using the exported variables in current scope)
+    log_debug "_sa_ensure_ssh_agent: Performing final verification of new agent..."
+    if _sa_check_ssh_agent; then
+        log_info "_sa_ensure_ssh_agent: New agent started and verified successfully (PID: $SSH_AGENT_PID)."
+        return 0 # Success!
+    else
+        log_error "_sa_ensure_ssh_agent: Started new agent but failed final verification."
+        # Clean up potentially bad environment state
+        unset SSH_AUTH_SOCK SSH_AGENT_PID
+        rm -f "$AGENT_ENV_FILE" # Remove possibly bad file
+        return 1 # Failure!
+    fi
+}
+
+# --- Main Execution Logic (when sourced) ---
+
+log_debug "ssh_agent_setup.sh: Script sourced. Running setup logic..."
+
+# Optional: Quick exit if already seems configured and valid
+
+# Ensure agent is running and variables are exported
+if ! _sa_ensure_ssh_agent; then
+    log_error "ssh_agent_setup.sh: Failed to ensure SSH agent is running."
+    return 1 # Use 'return' as this script is sourced
+fi
+
+# Agent should now be running and SSH_AUTH_SOCK/SSH_AGENT_PID exported
+
+# --- Load keys ---
+LOAD_METHOD="scan" # Default: Scan SSH directory
+KEY_SOURCE_FILE=""
+
+# Check if a filename argument was passed during sourcing
+if [ "$#" -ge 1 ] && [ -n "$1" ]; then
+    log_debug "ssh_agent_setup.sh: Argument provided: $1. Treating as key list file."
+    # Basic validation: Check if the provided argument is a readable file
+    if [ -f "$1" ] && [ -r "$1" ]; then
+        log_info "ssh_agent_setup.sh: Using provided file '$1' as source for key names."
+        LOAD_METHOD="file"
+        KEY_SOURCE_FILE="$1"
+    else
+        log_warn "ssh_agent_setup.sh: Argument '$1' is not a readable file. Falling back to scanning $SSH_DIR."
+        # Keep LOAD_METHOD="scan"
+    fi
+else
+    log_debug "ssh_agent_setup.sh: No argument provided. Scanning $SSH_DIR for keys."
+    # Keep LOAD_METHOD="scan"
+fi
+
+# Populate the VALID_KEY_LIST_FILE based on the load method
+log_debug "ssh_agent_setup.sh: Populating key list using method: $LOAD_METHOD"
+if [ "$LOAD_METHOD" = "file" ]; then
+    # Copy contents from the source file, ensuring the list file is clear first
+    if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
+         log_error "ssh_agent_setup.sh: Cannot create or touch key list file '$VALID_KEY_LIST_FILE'. Check permissions."
+         # Attempt to continue without loading keys
+         VALID_KEY_LIST_FILE=""
+    else
+        chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "ssh_agent_setup.sh: Could not set permissions on $VALID_KEY_LIST_FILE"
+        # Clear the list file first
+        log_debug "ssh_agent_setup.sh: Clearing key list file: $VALID_KEY_LIST_FILE"
+        if command -v truncate > /dev/null; then
+            truncate -s 0 "$VALID_KEY_LIST_FILE"
+        else
+            echo -n > "$VALID_KEY_LIST_FILE"
+        fi
+        if [ $? -ne 0 ]; then
+             log_error "ssh_agent_setup.sh: Failed to clear key list file '$VALID_KEY_LIST_FILE'. Cannot load keys from file."
+             VALID_KEY_LIST_FILE=""
+        else
+             # Copy lines, skipping empty lines and comments
+             log_debug "ssh_agent_setup.sh: Copying key names from '$KEY_SOURCE_FILE' to '$VALID_KEY_LIST_FILE'"
+             grep -vE '^\s*(#|$)' "$KEY_SOURCE_FILE" >> "$VALID_KEY_LIST_FILE"
+             local copy_status=$?
+             if [ $copy_status -ne 0 ] && [ $copy_status -ne 1 ]; then # grep returns 1 if no lines selected
+                  log_error "ssh_agent_setup.sh: Failed to read from source key file '$KEY_SOURCE_FILE' (grep status: $copy_status)."
+                  VALID_KEY_LIST_FILE="" # Mark as unusable
+             fi
+        fi
+    fi
+else # LOAD_METHOD is "scan"
+    # Use the existing function to scan the SSH directory
+    log_debug "ssh_agent_setup.sh: Calling _sa_update_keys_list_file to scan $SSH_DIR..."
+    if ! _sa_update_keys_list_file; then
+        # No valid keys found by scanning, or error occurred
+        log_info "ssh_agent_setup.sh: No valid key files found in $SSH_DIR or update failed."
+        VALID_KEY_LIST_FILE="" # Mark as unusable
+    fi
+fi
+
+# Attempt to add keys from the populated list file (if usable)
+if [ -n "$VALID_KEY_LIST_FILE" ] && [ -f "$VALID_KEY_LIST_FILE" ]; then
+    log_debug "ssh_agent_setup.sh: Calling _sa_add_keys_to_agent using list file '$VALID_KEY_LIST_FILE'..."
+    if ! _sa_add_keys_to_agent; then
+        log_warn "ssh_agent_setup.sh: _sa_add_keys_to_agent reported no keys were successfully added."
+        # This might be okay (e.g., all keys need passphrase), or might indicate issues.
+    fi
+else
+     log_warn "ssh_agent_setup.sh: Key list file '$VALID_KEY_LIST_FILE' is not available. Skipping key loading."
+fi
+
+log_debug "ssh_agent_setup.sh: Setup complete."
+return 0 # Indicate success (even if keys failed to load, agent is running) 
