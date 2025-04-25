@@ -163,46 +163,55 @@ log_info() {
 # Side Effects: None
 #
 validate_directory() {
+    log "Entering function: ${FUNCNAME[0]} (Dir: $1, Desc: $2)"
     local dir="$1"
     local description="$2"
+    local return_status=0
 
     # Check if directory exists
     if [ ! -d "$dir" ]; then
         printf "Error: %s directory '%s' does not exist\n" "$description" "$dir" >&2
-        return 1
-    fi
-
+        log_error "Validation failed: Directory '$dir' ($description) does not exist."
+        return_status=1
     # Check if directory is readable
-    if [ ! -r "$dir" ]; then
+    elif [ ! -r "$dir" ]; then
         printf "Error: %s directory '%s' is not readable\n" "$description" "$dir" >&2
-        return 1
-    fi
-
+        log_error "Validation failed: Directory '$dir' ($description) is not readable."
+        return_status=1
     # Check if directory is writable
-    if [ ! -w "$dir" ]; then
+    elif [ ! -w "$dir" ]; then
         printf "Error: %s directory '%s' is not writable\n" "$description" "$dir" >&2
-        return 1
-    fi
-
-    # Check if directory is executable
-    if [ ! -x "$dir" ]; then
+        log_error "Validation failed: Directory '$dir' ($description) is not writable."
+        return_status=1
+    # Check if directory is executable (accessible)
+    elif [ ! -x "$dir" ]; then
         printf "Error: %s directory '%s' is not accessible\n" "$description" "$dir" >&2
-        return 1
+        log_error "Validation failed: Directory '$dir' ($description) is not accessible."
+        return_status=1
     fi
 
-    return 0
+    log_debug "Exiting function: ${FUNCNAME[0]} (Dir: $1, Status: $return_status)"
+    return $return_status
 }
 
 validate_ssh_dir() {
+    log "Entering function: ${FUNCNAME[0]}"
     if ! validate_directory "$SSH_DIR" "SSH"; then
-        printf "Attempting to create SSH directory...\n"
+        log_warn "validate_ssh_dir: Initial validation failed for $SSH_DIR. Attempting to create."
+        printf "Attempting to create SSH directory '$SSH_DIR'...\n" | tee -a "$LOG_FILE"
         if ! mkdir -p "$SSH_DIR"; then
             printf "Error: Failed to create SSH directory '%s'\n" "$SSH_DIR" >&2
+            log_error "validate_ssh_dir: Failed to create directory $SSH_DIR"
+            log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - create failed)"
             return 1
         fi
+        log_info "validate_ssh_dir: Successfully created directory $SSH_DIR."
+        log_debug "validate_ssh_dir: Setting permissions (700) on $SSH_DIR."
         chmod 700 "$SSH_DIR"
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - created OK)"
         return 0
     fi
+    log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - exists and valid)"
     return 0
 }
 
@@ -217,14 +226,23 @@ validate_ssh_dir() {
 #   - Failure: Returns 1 otherwise.
 # Side Effects: None (Does NOT unset variables anymore)
 check_ssh_agent() {
+    log "Entering function: ${FUNCNAME[0]}"
     log "check_ssh_agent: Checking agent status... (PID='${SSH_AGENT_PID:-}', SOCK='${SSH_AUTH_SOCK:-}')"
     if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then log "check_ssh_agent: Required environment variables not set."; return 1; fi
     if [ ! -S "$SSH_AUTH_SOCK" ]; then log_error "check_ssh_agent: SSH_AUTH_SOCK is not a socket: $SSH_AUTH_SOCK"; return 1; fi
+    log_debug "check_ssh_agent: Verifying agent process PID: $SSH_AGENT_PID"
     if ! ps -p "$SSH_AGENT_PID" > /dev/null 2>&1; then log_error "check_ssh_agent: SSH_AGENT_PID ($SSH_AGENT_PID) process not running."; return 1; fi
-    ssh-add -l > /dev/null 2>&1
-    local exit_code=$?
+    log_debug "check_ssh_agent: Attempting communication via ssh-add -l"
+    # Pipe output to /dev/null but capture status of ssh-add, not tee (or true)
+    ssh-add -l > /dev/null 2>&1 || true
+    local exit_code=${PIPESTATUS[0]:-$?} # Use PIPESTATUS if available, fallback to $?
+    log_debug "check_ssh_agent: ssh-add -l communication attempt exit code: $exit_code"
+    # Exit codes 0 (keys listed) and 1 (no keys) indicate successful communication
     if [ $exit_code -eq 0 ] || [ $exit_code -eq 1 ]; then log "check_ssh_agent: Agent communication successful (exit code $exit_code)."; return 0; fi
-    log_error "check_ssh_agent: Cannot communicate with agent (ssh-add -l exit code $exit_code)."
+    # Exit code 2 means cannot connect
+    if [ $exit_code -eq 2 ]; then log_error "check_ssh_agent: Cannot communicate with agent (ssh-add -l exit code $exit_code). SOCK invalid or agent died?"; return 1; fi
+    # Other exit codes are unexpected errors
+    log_error "check_ssh_agent: Unexpected error communicating with agent (ssh-add -l exit code $exit_code)."
     return 1
 }
 
@@ -238,15 +256,18 @@ check_ssh_agent() {
 #   - Failure: Returns 1 with error message.
 # Side Effects: May start ssh-agent, exports variables, creates/updates ~/.ssh/agent.env
 ensure_ssh_agent() {
+    log "Entering function: ${FUNCNAME[0]}"
     log "Ensuring SSH agent is active..."
     local agent_env_file="$HOME/.ssh/agent.env"
 
     # 1. Check if agent is already configured and working in this environment
+    log_debug "ensure_ssh_agent: Checking current environment variables and agent status..."
     if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -n "${SSH_AGENT_PID:-}" ] && check_ssh_agent; then
         log "ensure_ssh_agent: Agent already running and sourced."
-        printf "SSH agent is already running.\n"
+        printf "SSH agent is already running.\n" | tee -a "$LOG_FILE"
         # Ensure they are exported, just in case
         export SSH_AUTH_SOCK SSH_AGENT_PID
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - existing agent OK)"
         return 0
     fi
     log "ensure_ssh_agent: Agent not (verifiably) running or sourced in current environment."
@@ -255,13 +276,16 @@ ensure_ssh_agent() {
     if [ -f "$agent_env_file" ]; then
         log "ensure_ssh_agent: Found persistent agent file: $agent_env_file. Sourcing..."
         # Source the file into the current script's environment
+        # shellcheck disable=SC1090 # Dynamically sourced file
         . "$agent_env_file" >/dev/null
+        log_debug "ensure_ssh_agent: Sourced persistent file. Checking agent status again..."
         # Now check if sourcing worked and the agent is valid
         if check_ssh_agent; then
             log "ensure_ssh_agent: Sourcing persistent file successful. Reusing agent."
-            printf "Successfully connected to existing ssh-agent.\n"
+            printf "Successfully connected to existing ssh-agent.\n" | tee -a "$LOG_FILE"
             # Ensure they are exported
             export SSH_AUTH_SOCK SSH_AGENT_PID
+            log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - sourced agent OK)"
             return 0
         else
             log_warn "ensure_ssh_agent: Persistent file found but agent invalid/inaccessible after sourcing. Removing stale file."
@@ -275,29 +299,35 @@ ensure_ssh_agent() {
 
     # 3. Start a new agent
     log "ensure_ssh_agent: Starting new ssh-agent..."
-    printf "Starting new ssh-agent...\n"
+    printf "Starting new ssh-agent...\n" | tee -a "$LOG_FILE"
 
     # Create .ssh directory if needed
-    if ! mkdir -p "$HOME/.ssh"; then log_error "ensure_ssh_agent: Failed to create SSH directory $HOME/.ssh"; printf "Error..."; return 1; fi
-    if ! chmod 700 "$HOME/.ssh"; then log_error "ensure_ssh_agent: Failed to set permissions on $HOME/.ssh"; printf "Warning..."; fi
+    log_debug "ensure_ssh_agent: Ensuring $HOME/.ssh directory exists..."
+    if ! mkdir -p "$HOME/.ssh"; then log_error "ensure_ssh_agent: Failed to create SSH directory $HOME/.ssh"; printf "Error creating SSH directory.\n" | tee -a "$LOG_FILE" >&2; return 1; fi
+    log_debug "ensure_ssh_agent: Setting permissions on $HOME/.ssh..."
+    if ! chmod 700 "$HOME/.ssh"; then log_error "ensure_ssh_agent: Failed to set permissions on $HOME/.ssh"; printf "Warning: Failed to set permissions on $HOME/.ssh.\n" | tee -a "$LOG_FILE" >&2; fi
 
     # Start ssh-agent and capture output
+    log_debug "ensure_ssh_agent: Executing ssh-agent -s..."
     local agent_output
     if ! agent_output=$(ssh-agent -s); then
         log_error "ensure_ssh_agent: Failed to execute ssh-agent -s"
-        printf "Error: Failed to start ssh-agent process\n" >&2
+        printf "Error: Failed to start ssh-agent process\n" | tee -a "$LOG_FILE" >&2
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - ssh-agent failed)"
         return 1
     fi
-    log "ensure_ssh_agent: ssh-add -s output captured."
+    log "ensure_ssh_agent: ssh-agent -s output captured: $agent_output"
 
     # Extract environment variables
+    log_debug "ensure_ssh_agent: Extracting environment variables from agent output..."
     local ssh_auth_sock="${agent_output#*SSH_AUTH_SOCK=}"
     ssh_auth_sock="${ssh_auth_sock%%;*}"
     local ssh_agent_pid="${agent_output#*SSH_AGENT_PID=}"
     ssh_agent_pid="${ssh_agent_pid%%;*}"
     if [ -z "$ssh_auth_sock" ] || [ -z "$ssh_agent_pid" ]; then
         log_error "ensure_ssh_agent: Failed to extract env vars from output: $agent_output"
-        printf "Error: Failed to parse ssh-agent output\n" >&2
+        printf "Error: Failed to parse ssh-agent output\n" | tee -a "$LOG_FILE" >&2
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - parse failed)"
         return 1
     fi
     log "ensure_ssh_agent: Extracted SOCK=$ssh_auth_sock PID=$ssh_agent_pid"
@@ -314,33 +344,41 @@ ensure_ssh_agent() {
         printf 'SSH_AGENT_PID=%s; export SSH_AGENT_PID;\n' "$ssh_agent_pid"
         printf '# Agent started on %s\n' "$(date)"
     } > "$agent_env_file"
-    if ! chmod 600 "$agent_env_file"; then log_error "ensure_ssh_agent: Failed to set permissions on $agent_env_file"; printf "Warning..."; fi
+    log_debug "ensure_ssh_agent: Setting permissions on $agent_env_file..."
+    if ! chmod 600 "$agent_env_file"; then log_error "ensure_ssh_agent: Failed to set permissions on $agent_env_file"; printf "Warning: Failed to set permissions on agent env file.\n" | tee -a "$LOG_FILE" >&2; fi
     log "ensure_ssh_agent: Agent environment saved."
 
     # Final verification (using the exported variables in current scope)
-    sleep 0.5
+    log_debug "ensure_ssh_agent: Performing final verification of new agent..."
+    sleep 0.5 # Give agent a moment
     if check_ssh_agent; then
         log "ensure_ssh_agent: New agent started and verified successfully."
-        printf "Successfully started new ssh-agent.\n"
+        printf "Successfully started new ssh-agent.\n" | tee -a "$LOG_FILE"
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - new agent OK)"
         return 0 # Success!
     else
         log_error "ensure_ssh_agent: Started new agent but failed final verification."
-        printf "Error: Failed to verify new ssh-agent after starting it.\n" >&2
+        printf "Error: Failed to verify new ssh-agent after starting it.\n" | tee -a "$LOG_FILE" >&2
         # Clean up potentially bad environment state
+        log_debug "ensure_ssh_agent: Cleaning up failed agent state..."
         unset SSH_AUTH_SOCK SSH_AGENT_PID
         rm -f "$agent_env_file" # Remove possibly bad file
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - verification failed)"
         return 1 # Failure!
     fi
 }
 
 # --- Core Functions ---
 update_keys_list_file() {
+    log "Entering function: ${FUNCNAME[0]}"
     log "Finding private key files in $SSH_DIR..."
 
     # Clear the temporary file
+    log_debug "update_keys_list_file: Clearing temporary key list file: $KEYS_LIST_TMP"
     > "$KEYS_LIST_TMP"
 
     # Platform-specific find command
+    log_debug "update_keys_list_file: Running find command for platform $PLATFORM..."
     if [[ "$PLATFORM" == "Darwin" ]]; then
         # macOS version (without -printf)
         find "$SSH_DIR" -maxdepth 1 -type f \
@@ -358,30 +396,58 @@ update_keys_list_file() {
             ! -name 'config' \
             -printf '%f\n' > "$KEYS_LIST_TMP"
     fi
+    log_debug "update_keys_list_file: Find command complete."
 
     # Count the number of keys found
+    log_debug "update_keys_list_file: Counting keys found..."
     local key_count
     key_count=$(wc -l < "$KEYS_LIST_TMP")
+    log_debug "update_keys_list_file: Found $key_count entries in temp file."
 
     if [ "$key_count" -eq 0 ]; then
-        printf "No SSH keys found in %s\n" "$SSH_DIR"
+        printf "No SSH keys found in %s\n" "$SSH_DIR" | tee -a "$LOG_FILE"
         log "No SSH keys found in directory"
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - no keys found)" # Assuming update should fail if no keys found
+        return 1 # Indicate failure if no keys found, matching previous logic check in main
     else
-        printf "Found %d SSH key(s) in %s\n" "$key_count" "$SSH_DIR"
+        printf "Found %d SSH key(s) in %s\n" "$key_count" "$SSH_DIR" | tee -a "$LOG_FILE"
         log "Found $key_count SSH key(s) in directory"
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - keys found)"
+        return 0
     fi
 }
 
 delete_keys_from_agent() {
+    log "Entering function: ${FUNCNAME[0]}"
     log "Deleting all keys from ssh-agent..."
-    if ssh-add -D; then
+    log_debug "delete_keys_from_agent: Running ssh-add -D..."
+    # Add || true to prevent set -e exit on failure, then check status
+    ssh-add -D || true
+    local del_status=${PIPESTATUS[0]:-$?} # Get status of ssh-add, not true
+    log_debug "delete_keys_from_agent: ssh-add -D exit status: $del_status"
+
+    if [ "$del_status" -eq 0 ]; then
         log "All keys successfully deleted from agent."
+        printf "All keys successfully deleted from agent.\n" | tee -a "$LOG_FILE"
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 0)"
+        return 0
+    elif [ "$del_status" -eq 1 ]; then
+        # Exit code 1 from ssh-add -D often means "no keys to delete"
+        log_info "Could not delete keys from agent (status: $del_status) - likely none were loaded."
+        printf "No keys found in agent to delete.\n" | tee -a "$LOG_FILE"
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - no keys)"
+        return 0 # Treat as success in this context
     else
-        log_warn "Could not delete keys from agent (maybe none were loaded?). Status: $?"
+        # Other non-zero codes indicate an error
+        log_error "Failed to delete keys from agent (status: $del_status)."
+        printf "Error: Failed to delete keys from agent (status: %d).\n" "$del_status" | tee -a "$LOG_FILE" >&2
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - error)"
+        return 1
     fi
 }
 
 add_keys_to_agent() {
+    log "Entering function: ${FUNCNAME[0]}"
     log "Adding keys listed in $KEYS_LIST_TMP to the agent..."
     local keyfile
     local key_path
@@ -389,45 +455,74 @@ add_keys_to_agent() {
     local failed_count=0
 
     if [ ! -s "$KEYS_LIST_TMP" ]; then
-        printf "No SSH keys found in directory. Nothing to add.\n"
-        log "Key list file is empty. No keys to add."
-        return
+        printf "No SSH keys found in directory list. Nothing to add.\n" | tee -a "$LOG_FILE"
+        log "Key list file ($KEYS_LIST_TMP) is empty or does not exist. No keys to add."
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - no keys list)"
+        return 1 # Indicate failure condition - no keys to even try adding
     fi
 
-    printf "Adding SSH keys to agent...\n"
+    printf "Adding SSH keys to agent...\n" | tee -a "$LOG_FILE"
+    log_debug "add_keys_to_agent: Starting loop through keys in $KEYS_LIST_TMP..."
     while IFS= read -r keyfile || [[ -n "$keyfile" ]]; do
         [ -z "$keyfile" ] && continue
         key_path="$SSH_DIR/$keyfile"
+        log_debug "add_keys_to_agent: Processing key entry: $keyfile (Path: $key_path)"
 
         if [ -f "$key_path" ]; then
-            printf "Adding key: %s\n" "$keyfile"
+            printf "Adding key: %s\n" "$keyfile" | tee -a "$LOG_FILE"
             log "Attempting to add key: $key_path"
             local ssh_add_output
             local ssh_add_status=0
+            local cmd_to_run
 
+            log_debug "add_keys_to_agent: Running ssh-add for $key_path (Platform: $PLATFORM)"
+            # Run ssh-add, capture output and status, allow failure without set -e exit
+            # Pipe stderr to stdout to capture errors in the output variable
             if [[ "$PLATFORM" == "Darwin" ]]; then
-                ssh_add_output=$(ssh-add --apple-use-keychain "$key_path" 2>&1) || ssh_add_status=$?
+                cmd_to_run="ssh-add --apple-use-keychain \"$key_path\""
+                ssh_add_output=$(ssh-add --apple-use-keychain "$key_path" 2>&1 || true)
+                ssh_add_status=${PIPESTATUS[0]:-$?}
             else
-                ssh_add_output=$(ssh-add "$key_path" 2>&1) || ssh_add_status=$?
+                cmd_to_run="ssh-add \"$key_path\""
+                ssh_add_output=$(ssh-add "$key_path" 2>&1 || true)
+                ssh_add_status=${PIPESTATUS[0]:-$?}
+            fi
+            log_debug "add_keys_to_agent: ssh-add command ('$cmd_to_run') finished with status: $ssh_add_status"
+            log_debug "add_keys_to_agent: ssh-add output: $ssh_add_output"
+
+            # Log the raw output from ssh-add as well
+            if [ -n "$ssh_add_output" ]; then
+                 echo "$ssh_add_output" >> "$LOG_FILE"
             fi
 
             if [ $ssh_add_status -eq 0 ]; then
-                printf "  ✓ Successfully added\n"
+                printf "  ✓ Successfully added\n" | tee -a "$LOG_FILE"
                 log "Successfully added $keyfile"
                 ((added_count++))
             else
-                printf "  ✗ Failed to add (status: %d)\n" "$ssh_add_status"
-                log_error "Failed to add key: $keyfile (status: $ssh_add_status). Output: $ssh_add_output"
+                printf "  ✗ Failed to add (status: %d)\n" "$ssh_add_status" | tee -a "$LOG_FILE"
+                log_error "Failed to add key: $keyfile (status: $ssh_add_status). Output logged above."
                 ((failed_count++))
             fi
         else
-            printf "  ✗ Key file '%s' not found\n" "$keyfile"
+            printf "  ✗ Key file '%s' not found at '%s'\n" "$keyfile" "$key_path" | tee -a "$LOG_FILE"
             log_warn "Key file '$keyfile' listed but not found at '$key_path'. Skipping."
+            ((failed_count++)) # Count missing files as failures too
         fi
     done < "$KEYS_LIST_TMP"
+    log_debug "add_keys_to_agent: Finished loop through keys."
 
-    printf "\nSummary: %d key(s) added, %d key(s) failed\n" "$added_count" "$failed_count"
+    printf "\nSummary: %d key(s) added, %d key(s) failed\n" "$added_count" "$failed_count" | tee -a "$LOG_FILE"
     log "Finished adding keys. Added: $added_count, Failed: $failed_count"
+
+    # Determine final return status: 0 if at least one key added, 1 otherwise
+    if [ "$added_count" -gt 0 ]; then
+      log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - some keys added)"
+      return 0
+    else
+      log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - no keys added)"
+      return 1
+    fi
 }
 
 # --- Menu Functions ---
@@ -471,251 +566,334 @@ wait_for_key() {
 }
 
 list_current_keys() {
+    log "Entering function: ${FUNCNAME[0]}"
     log_debug "Running ssh-add -l to get status..."
     # Run once to check status without capturing output, avoiding potential command substitution issues
-    ssh-add -l >/dev/null 2>&1 || true # Allow exit codes 1 or 2 without triggering set -e
-    local exit_code=$?
+    # Allow exit codes 1 or 2 without triggering set -e
+    ssh-add -l >/dev/null 2>&1 || true
+    local exit_code=${PIPESTATUS[0]:-$?} # Get status of ssh-add, not true
     log_debug "ssh-add -l initial exit code: $exit_code"
+
+    local return_status=0 # Default to success
 
     case $exit_code in
         0)
             log_info "list_current_keys: Agent reports keys are loaded (Exit code: 0). Attempting to list..."
-            printf "Keys currently loaded in the agent:\n"
-            # Now run it again to actually display the keys
+            printf "Keys currently loaded in the agent:\n" | tee -a "$LOG_FILE"
+            # Now run it again to actually display the keys and log them
             # Allow exit code 1 (no identities) here, treat other non-zero as error
-            ssh-add -l || true # Allow exit code 1 without terminating script via set -e
-            local list_exit_code=$?
+            # Pipe output to tee for logging
+            ssh-add -l || true | tee -a "$LOG_FILE"
+            local list_exit_code=${PIPESTATUS[0]:-$?} # Get status of ssh-add, not tee
             log_debug "list_current_keys: Second ssh-add -l exit code: $list_exit_code"
+            # Check for unexpected errors (neither 0 nor 1)
             if [ "$list_exit_code" -ne 0 ] && [ "$list_exit_code" -ne 1 ]; then
                 log_error "list_current_keys: ssh-add -l failed unexpectedly (exit code $list_exit_code) despite initial exit code 0."
+                # Don't pipe this error, it's already logged
                 printf "Error listing keys (Code: %s), although agent reported keys present.\n" "$list_exit_code" >&2
-                return 1 # Indicate an error state
+                return_status=1 # Indicate an error state
             fi
             # If exit code was 0 or 1, the command either listed keys or printed 'no identities'
             # In either case, the function succeeded in its task.
+            log_debug "list_current_keys: Listing complete (or confirmed no identities)."
             ;;
         1)
             log_info "list_current_keys: No keys currently loaded (Exit code: 1)."
-            printf "No keys currently loaded in the agent.\n"
-            printf "Hint: Use option 3 to load keys from '%s'.\n" "$SSH_DIR"
+            printf "No keys currently loaded in the agent.\n" | tee -a "$LOG_FILE"
+            printf "Hint: Use option 3 to load keys from '%s'.\n" "$SSH_DIR" | tee -a "$LOG_FILE"
             ;;
         2)
             log_error "list_current_keys: SSH_AUTH_SOCK invalid or agent not running (Exit code: 2)."
+            # Don't pipe this error, it's already logged
             printf "Error: Could not connect to the SSH agent. Is it running?\n" >&2
-            return 1 # Indicate an error state
+            return_status=1 # Indicate an error state
             ;;
         *)
-            log_error "list_current_keys: Unknown error from ssh-add -l (Exit code: $exit_code)."
+            log_error "list_current_keys: Unknown error from ssh-add -l check (Exit code: $exit_code)."
+            # Don't pipe this error, it's already logged
             printf "Error: An unexpected error occurred while checking SSH keys (Code: %s).\n" "$exit_code" >&2
-            return 1 # Indicate an error state
+            return_status=1 # Indicate an error state
             ;;
     esac
 
-    return 0 # Indicate success (either listed or confirmed no keys)
+    log_debug "Exiting function: ${FUNCNAME[0]} (status: $return_status)"
+    return $return_status
 }
 
 display_log_location() {
-    printf "\n+++ Log File Information +++\n"
+    log "Entering function: ${FUNCNAME[0]}"
+    printf "\n+++ Log File Information +++\n" | tee -a "$LOG_FILE"
     if [ "$LOG_FILE" = "/dev/null" ]; then
-        printf "Logging is currently disabled.\n"
+        printf "Logging is currently disabled.\n" | tee -a "$LOG_FILE"
+        log_info "Logging is disabled."
     else
-        printf "Current log file location: %s\n" "$LOG_FILE"
-        printf "Log file size: %s\n" "$(ls -lh "$LOG_FILE" 2>/dev/null | awk '{print $5}')"
+        log_info "Displaying log file location: $LOG_FILE"
+        printf "Current log file location: %s\n" "$LOG_FILE" | tee -a "$LOG_FILE"
+        local log_size_human="-"
+        if [ -f "$LOG_FILE" ]; then
+            log_size_human=$(ls -lh "$LOG_FILE" 2>/dev/null | awk '{print $5}')
+            log_debug "Log file size (human): $log_size_human"
+        else
+             log_warn "Log file $LOG_FILE not found when trying to get size."
+        fi
+        printf "Log file size: %s\n" "$log_size_human" | tee -a "$LOG_FILE"
     fi
-    printf "++++++++++++++++++++++++++++++++++++\n"
+    printf "++++++++++++++++++++++++++++++++++++\n" | tee -a "$LOG_FILE"
+    log_debug "Exiting function: ${FUNCNAME[0]} (status: 0)"
+    # This function doesn't really fail, so always return 0
+    return 0
 }
 
 delete_single_key() {
-    printf "\n+++ Delete Single Key +++\n"
-    log_debug "delete_single_key: Checking for loaded keys..."
+    log "Entering function: ${FUNCNAME[0]}"
+    printf "\n+++ Delete Single Key +++\n" | tee -a "$LOG_FILE"
 
-    # Explicitly check agent status and key presence
-    ssh-add -l >/dev/null 2>&1
-    local exit_code=$?
-    log_debug "delete_single_key: ssh-add -l status check exit code: $exit_code"
+    # FIRST: Check if any keys are actually loaded in the agent right now.
+    log_debug "delete_single_key: Checking agent status via ssh-add -l..."
+    local agent_list_output
+    agent_list_output=$(ssh-add -l 2>/dev/null || true)
+    local agent_check_status=${PIPESTATUS[0]:-$?} # Get status of ssh-add
+    log_debug "delete_single_key: Initial ssh-add -l check status: $agent_check_status. Output:\n$agent_list_output"
 
-    case $exit_code in
-        0)
-            # Keys are present, proceed with deletion logic
-            log_info "delete_single_key: Keys found. Proceeding with selection."
-            ;;
-        1)
-            log_info "delete_single_key: No keys loaded (exit code 1)."
-            printf "No keys currently loaded in ssh-agent.\n"
-            return 0 # Nothing to delete, return to menu successfully
-            ;;
-        2)
-            log_error "delete_single_key: Cannot connect to agent (exit code 2)."
-            printf "Error: Could not connect to the SSH agent.\n" >&2
-            return 1 # Indicate error, return to menu
-            ;;
-        *)
-            log_error "delete_single_key: Unknown error from ssh-add -l check (exit code $exit_code)."
-            printf "Error: An unexpected error occurred checking keys (Code: %s).\n" "$exit_code" >&2
-            return 1 # Indicate error, return to menu
-            ;;
-    esac
+    # Check for errors first (excluding expected status 0 and 1)
+    if [ "$agent_check_status" -ne 0 ] && [ "$agent_check_status" -ne 1 ]; then
+        # Handle agent connection error (status 2) or other unexpected errors
+        log_error "delete_single_key: Cannot query agent (ssh-add -l check status: $agent_check_status)."
+        printf "Error: Could not query the SSH agent (status: %d).\n" "$agent_check_status" >&2
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - agent query error)"
+        return 1 # Error
+    fi
 
-    # --- Proceed with deletion if exit_code was 0 ---
-    local key_list
-    # Now get the list for display (error here would be unexpected)
-    if ! key_list=$(ssh-add -l 2>&1); then
-        log_error "delete_single_key: Failed to get key list via ssh-add -l even though initial check passed."
-        printf "Error: Failed to retrieve key list from agent.\n" >&2
+    # Now check if keys are *really* present (Status 1 OR output is 'no identities' means NO keys)
+    local trimmed_agent_list
+    trimmed_agent_list=$(echo "$agent_list_output" | awk '{$1=$1};1') # Trim whitespace
+    if [ "$agent_check_status" -eq 1 ] || [[ "$trimmed_agent_list" == "The agent has no identities."* ]]; then # Use wildcard match for robustness
+         log_info "delete_single_key: No keys currently loaded in agent (Status: $agent_check_status, List: '$trimmed_agent_list')."
+         printf "No keys currently loaded in ssh-agent to delete.\n" | tee -a "$LOG_FILE"
+         log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - no keys loaded)"
+         return 0 # Success, nothing to do
+    fi
+
+    # If we reach here, agent_check_status was 0 AND output was not "no identities"
+    # Meaning keys ARE actually loaded and listed.
+    log_info "delete_single_key: Agent has keys loaded. Proceeding to list key *files* for deletion."
+
+    # SECOND: Proceed with listing files for deletion (macOS Keychain compatibility)
+    log_debug "delete_single_key: Updating file list cache..."
+    if ! update_keys_list_file; then
+        log_error "delete_single_key: Failed to update list of key files. Cannot proceed."
+        # Error message already printed by update_keys_list_file
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - update_keys_list_file failed)"
         return 1
     fi
 
-    if [ -z "$key_list" ]; then
-        log_warn "delete_single_key: ssh-add -l returned 0 but produced empty output. Treating as no keys."
-        printf "No keys currently loaded in ssh-agent (unexpected empty list).\n"
-        return 0
+    # Check if the temporary file list is empty after update
+    if [ ! -s "$KEYS_LIST_TMP" ]; then
+        # This case should be unlikely if agent reported keys loaded, but check anyway
+        log_error "delete_single_key: Agent reported keys, but no key files found in $SSH_DIR after update."
+        printf "Error: Inconsistency detected - agent has keys, but no key files found in %s.\n" "$SSH_DIR" >&2
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - inconsistency)"
+        return 1
     fi
 
-    # Display numbered list of keys
-    printf "Select a key to delete:\n"
-    local i=1
-    local keys=()
-    # Use mapfile/readarray if available for safer parsing, otherwise use while read
+    # Read the list of key filenames into an array
+    local key_files=()
+    log_debug "delete_single_key: Reading key filenames from $KEYS_LIST_TMP..."
     if command -v mapfile >/dev/null; then
-        mapfile -t keys <<< "$key_list"
+        mapfile -t key_files < "$KEYS_LIST_TMP"
     else
-        # Fallback for shells without mapfile (less robust with weird chars)
-        log_warn "delete_single_key: mapfile command not found, using 'while read' loop (may have issues with special characters)."
+        log_warn "delete_single_key: mapfile command not found, using 'while read' loop."
         while IFS= read -r line; do
-            keys+=("$line")
-        done <<< "$key_list"
+            # Skip empty lines just in case
+            [ -n "$line" ] && key_files+=("$line")
+        done < "$KEYS_LIST_TMP"
     fi
 
-    for i in "${!keys[@]}"; do
-        printf "  %2d) %s\n" "$((i + 1))" "${keys[i]}"
+    if [ ${#key_files[@]} -eq 0 ]; then
+        log_error "delete_single_key: Failed to read key filenames from $KEYS_LIST_TMP after mapfile/read."
+        printf "Error reading key file list.\n" >&2
+        log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - read list failed)"
+        return 1
+    fi
+
+    log_debug "delete_single_key: Found ${#key_files[@]} key files to list."
+
+    # Display numbered list of filenames
+    printf "Select a key file to remove from the agent:\n" | tee -a "$LOG_FILE"
+    local i
+    for i in "${!key_files[@]}"; do
+        printf "  %2d) %s\n" "$((i + 1))" "${key_files[i]}" | tee -a "$LOG_FILE"
     done
 
+    local return_status=1 # Default to failure unless successful
     # Get user selection
+    log_debug "delete_single_key: Waiting for user input..."
     while true; do
         read -r -p "Enter key number to delete (or 'c' to cancel): " choice < /dev/tty
+        log_debug "delete_single_key: User entered: '$choice'"
         case "$choice" in
             c|C)
-                printf "Operation cancelled.\n"
+                printf "Operation cancelled.\n" | tee -a "$LOG_FILE"
                 log_info "delete_single_key: User cancelled operation."
-                return 0 # Cancelled successfully
+                return_status=0 # Cancelled successfully
+                break # Exit loop
                 ;;
             *) # Validate input is a number within range
-                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#keys[@]}" ]; then
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#key_files[@]}" ]; then
                     local selected_index=$((choice - 1))
-                    local selected_key_line="${keys[$selected_index]}"
-                    local key_path_or_fingerprint # Can be path or fingerprint depending on ssh-add version/output
+                    local selected_filename="${key_files[$selected_index]}"
+                    local key_path="$SSH_DIR/$selected_filename"
+                    log_info "delete_single_key: User selected key file index: $choice (Filename: '$selected_filename', Path: '$key_path')"
 
-                    # Attempt to extract fingerprint (more reliable for deletion)
-                    # Fingerprint is usually the second field (SHA256:...) or third field if bits/type are first
-                    # Let's try extracting what looks like a fingerprint or fallback to path
-                    key_path_or_fingerprint=$(echo "$selected_key_line" | awk '{ for(i=1; i<=NF; i++) if ($i ~ /^(SHA256:|MD5:|[0-9a-f:]+$)/) { print $i; exit } }')
+                    printf "Attempting to delete key file: %s\n" "$selected_filename" | tee -a "$LOG_FILE"
+                    log "delete_single_key: Attempting ssh-add -d '$key_path'"
 
-                    # If fingerprint extraction failed, try getting the path (usually last field)
-                    if [ -z "$key_path_or_fingerprint" ]; then
-                         key_path_or_fingerprint=$(echo "$selected_key_line" | awk '{print $NF}')
-                         log_warn "delete_single_key: Could not reliably extract fingerprint for '$selected_key_line', attempting deletion using path/comment: '$key_path_or_fingerprint'"
+                    # Perform the deletion using the file path
+                    # Redirect stderr to /dev/null
+                    ssh-add -d "$key_path" 2>/dev/null || true
+                    local del_status=${PIPESTATUS[0]:-$?} # Get status of ssh-add
+                    log "delete_single_key: ssh-add -d exited with status: $del_status"
+
+                    if [ "$del_status" -eq 0 ]; then
+                        printf "Key '%s' successfully deleted from agent.\n" "$selected_filename" | tee -a "$LOG_FILE"
+                        log "delete_single_key: Successfully deleted key file '$key_path'"
+                        return_status=0 # Success
                     else
-                         log_info "delete_single_key: Extracted fingerprint/identifier: '$key_path_or_fingerprint' for '$selected_key_line'"
+                        # ssh-add -d failed (exit code 1 usually means key not found in agent)
+                        printf "Error: Failed to delete key '%s' from agent (status: %d).\n" "$selected_filename" "$del_status" | tee -a "$LOG_FILE" >&2
+                        log_error "delete_single_key: Failed to delete key file '$key_path' (ssh-add -d exit status: $del_status)."
+                        if [ "$del_status" -eq 1 ]; then
+                             printf "       (This often means the key wasn't loaded in the agent session.)\n" | tee -a "$LOG_FILE" >&2
+                        fi
+                        return_status=1 # Indicate deletion failed
                     fi
-
-                    printf "Attempting to delete key corresponding to: %s\n" "$selected_key_line"
-                    log "delete_single_key: Attempting ssh-add -d '$key_path_or_fingerprint'"
-
-                    # Perform the deletion, explicitly check return status
-                    if ssh-add -d "$key_path_or_fingerprint"; then
-                        printf "Key successfully deleted.\n"
-                        log "delete_single_key: Successfully deleted key matching '$key_path_or_fingerprint'"
-                        return 0 # Success
-                    else
-                        # ssh-add -d might fail if the identifier wasn't precise enough
-                        local del_status=$?
-                        log_error "delete_single_key: Failed to delete key matching '$key_path_or_fingerprint' (ssh-add -d exit status: $del_status)."
-                        printf "Error: Failed to delete the selected key (status: %d). The agent might require the exact private key file path which isn't always available from 'ssh-add -l'.\n" "$del_status"
-                        printf "You may need to use 'ssh-add -D' to remove all keys if specific deletion fails.\n"
-                        return 1 # Indicate deletion failed
-                    fi
+                    break # Exit loop after attempt
                 else
-                    printf "Invalid selection. Please enter a number between 1 and %d, or 'c' to cancel.\n" "${#keys[@]}"
+                    printf "Invalid selection. Please enter a number between 1 and %d, or 'c' to cancel.\n" "${#key_files[@]}" | tee -a "$LOG_FILE"
+                    log_warn "delete_single_key: Invalid user input: '$choice'"
                 fi
                 ;;
         esac
     done
+
+    log_debug "Exiting function: ${FUNCNAME[0]} (status: $return_status)"
+    return $return_status
 }
 
 delete_all_keys() {
-    printf "\n+++ Delete All Keys +++\n"
+    log "Entering function: ${FUNCNAME[0]}"
+    printf "\n+++ Delete All Keys +++\n" | tee -a "$LOG_FILE"
     log_debug "delete_all_keys: Checking for loaded keys..."
 
     # Explicitly check agent status and key presence
-    ssh-add -l >/dev/null 2>&1
-    local exit_code=$?
+    ssh-add -l >/dev/null 2>&1 || true
+    local exit_code=${PIPESTATUS[0]:-$?} # Get status of ssh-add, not true
     log_debug "delete_all_keys: ssh-add -l status check exit code: $exit_code"
 
     local key_count=0
+    local return_status=0 # Default success
+
     case $exit_code in
         0)
-            # Keys are present, count them for confirmation message
-            log_info "delete_all_keys: Keys found. Counting keys."
+            # Keys *might* be present (or just agent is reachable). Get list to confirm.
+            log_info "delete_all_keys: Agent reachable (initial check status 0). Retrieving list..."
             local key_list
-            if key_list=$(ssh-add -l 2>/dev/null); then
-                 # Count lines carefully, handle potential empty string from ssh-add -l
-                if [ -n "$key_list" ]; then
-                    key_count=$(echo "$key_list" | wc -l)
-                fi
-            else
-                 log_error "delete_all_keys: Failed to get key list for counting even though initial check passed."
-                 printf "Error: Failed to retrieve key list from agent for counting.\n" >&2
+            # Run command, capture output and status, allow status 1 (no keys)
+            key_list=$(ssh-add -l 2>/dev/null || true)
+            local list_status=${PIPESTATUS[0]:-$?} # Get status of ssh-add, not true
+            log_debug "delete_all_keys: ssh-add -l for list retrieval status: $list_status. Output:\n$key_list"
+
+            # Check if the listing command itself failed unexpectedly (not exit code 0 or 1)
+            if [ "$list_status" -ne 0 ] && [ "$list_status" -ne 1 ]; then
+                 log_error "delete_all_keys: Failed to get key list (ssh-add -l status: $list_status) even though initial check passed."
+                 printf "Error: Failed to retrieve key list from agent for counting (Code: %d).\n" "$list_status" >&2
+                 log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - list retrieval failed)"
                  return 1 # Error, return to menu
             fi
 
+            # Now, check the *content* if status was 0 or 1
+            # Trim potential whitespace for comparison
+            local trimmed_key_list
+            trimmed_key_list=$(echo "$key_list" | awk '{$1=$1};1') # Trim leading/trailing whitespace
+            if [ "$list_status" -eq 1 ] || [ "$trimmed_key_list" = "The agent has no identities." ]; then
+                 # Status 1 OR the specific message means no keys
+                 log_info "delete_all_keys: Agent has no identities (Status: $list_status, List: '$trimmed_key_list')."
+                 key_count=0
+            elif [ -n "$key_list" ]; then
+                 # Status 0 and not the specific message, count lines
+                 key_count=$(echo "$key_list" | wc -l)
+                 log_debug "delete_all_keys: Counted $key_count keys."
+            else
+                 # Status 0 but empty list (shouldn't happen with ssh-add -l?)
+                 log_warn "delete_all_keys: ssh-add -l status 0 but output is empty. Treating as 0 keys."
+                 key_count=0
+            fi
+
+            # Proceed based on final count
             if [ "$key_count" -eq 0 ]; then
-                log_info "delete_all_keys: ssh-add -l returned 0 but list is empty or count failed. No keys to delete."
-                printf "No keys currently loaded in ssh-agent.\n"
+                log_info "delete_all_keys: Counted 0 keys. No keys to delete."
+                printf "No keys currently loaded in ssh-agent.\n" | tee -a "$LOG_FILE"
+                log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - no keys)"
                 return 0 # Nothing to delete, return successfully
             fi
             log_info "delete_all_keys: Found $key_count keys to delete."
             ;;
         1)
             log_info "delete_all_keys: No keys loaded (exit code 1)."
-            printf "No keys currently loaded in ssh-agent.\n"
+            printf "No keys currently loaded in ssh-agent.\n" | tee -a "$LOG_FILE"
+            log_debug "Exiting function: ${FUNCNAME[0]} (status: 0 - no keys)"
             return 0 # Nothing to delete, return successfully
             ;;
         2)
             log_error "delete_all_keys: Cannot connect to agent (exit code 2)."
             printf "Error: Could not connect to the SSH agent.\n" >&2
+            log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - agent connect error)"
             return 1 # Indicate error, return to menu
             ;;
         *)
             log_error "delete_all_keys: Unknown error from ssh-add -l check (exit code $exit_code)."
             printf "Error: An unexpected error occurred checking keys (Code: %s).\n" "$exit_code" >&2
+            log_debug "Exiting function: ${FUNCNAME[0]} (status: 1 - unknown error)"
             return 1 # Indicate error, return to menu
             ;;
     esac
 
     # --- Proceed with deletion confirmation if exit_code was 0 and key_count > 0 ---
-    printf "This will delete all %d keys from ssh-agent.\n" "$key_count"
+    printf "This will delete all %d keys from ssh-agent.\n" "$key_count" | tee -a "$LOG_FILE"
+    log_debug "delete_all_keys: Waiting for user confirmation..."
+    # Do not tee read prompt
     read -r -p "Are you sure you want to continue? (y/N): " confirm < /dev/tty
+    log_debug "delete_all_keys: User entered confirmation: '$confirm'"
 
     case "$confirm" in
         y|Y)
             log_info "delete_all_keys: User confirmed deletion of all keys."
-            if ssh-add -D; then
-                printf "All keys successfully deleted.\n"
+            log_debug "delete_all_keys: Running ssh-add -D..."
+            # Add || true to prevent set -e exit on failure, then check status
+            ssh-add -D || true
+            local del_status=${PIPESTATUS[0]:-$?} # Get status of ssh-add, not true
+            log "delete_all_keys: ssh-add -D exited with status: $del_status"
+
+            if [ "$del_status" -eq 0 ]; then
+                printf "All keys successfully deleted.\n" | tee -a "$LOG_FILE"
                 log "delete_all_keys: Successfully deleted all keys from ssh-agent"
-                return 0 # Success
+                return_status=0 # Success
             else
-                local del_status=$?
-                printf "Error: Failed to delete all keys (status: %d).\n" "$del_status"
+                # Should not happen if initial checks were okay, but handle anyway
+                printf "Error: Failed to delete all keys (status: %d).\n" "$del_status" | tee -a "$LOG_FILE" >&2
                 log_error "delete_all_keys: Failed to delete all keys using ssh-add -D (status: $del_status)"
-                return 1 # Failure
+                return_status=1 # Failure
             fi
             ;;
         *)
-            printf "Operation cancelled.\n"
+            printf "Operation cancelled.\n" | tee -a "$LOG_FILE"
             log_info "delete_all_keys: User cancelled operation."
-            return 0 # Cancelled successfully
+            return_status=0 # Cancelled successfully
             ;;
     esac
+
+    log_debug "Exiting function: ${FUNCNAME[0]} (status: $return_status)"
+    return $return_status
 }
 
 # --- Main Execution Logic ---
@@ -725,91 +903,126 @@ main() {
         printf "Warning: Logging setup failed. Continuing with limited logging.\n" >&2
     fi
     log "************* STARTING SCRIPT *************"
-    log "Script starting..."
-    log "Platform: $PLATFORM"
-    log "User: $USER"
-    log "Host: $(hostname)"
+    log_info "Script starting... PID: $$"
+    log_info "Platform: $PLATFORM"
+    log_info "User: $USER"
+    log_info "Host: $(hostname)"
 
     # Validate SSH directory
+    log_debug "Validating SSH directory: $SSH_DIR"
     if ! validate_ssh_dir; then
         printf "Error: SSH directory validation failed. Please check permissions and try again.\n" >&2
-        log_error "SSH directory validation failed"
+        log_error "SSH directory validation failed. Exiting."
         exit 1
     fi
+    log_debug "SSH directory validation successful."
 
     # Check if required commands are available
+    log_debug "Checking for required commands: ssh-add, ssh-agent"
     if ! command -v ssh-add > /dev/null || ! command -v ssh-agent > /dev/null ; then
         printf "Error: 'ssh-add' or 'ssh-agent' command not found. Please ensure SSH tools are installed.\n" >&2
-        log_error "'ssh-add' or 'ssh-agent' command not found. Please ensure SSH tools are installed."
+        log_error "'ssh-add' or 'ssh-agent' command not found. Exiting."
         exit 1
     fi
+    log_debug "Required commands found."
 
     log "DEBUG: Main - Calling ensure_ssh_agent..."
     if ! ensure_ssh_agent; then # Check only for success (0) or failure (1)
-        log_error "ensure_ssh_agent failed. Exiting."
+        log_error "ensure_ssh_agent failed during startup. Exiting."
         # ensure_ssh_agent already prints detailed errors
         exit 1
     fi
     # If ensure_ssh_agent returned 0, we are guaranteed to have the vars exported
     log "DEBUG: Main - Agent setup complete. SSH_AUTH_SOCK='${SSH_AUTH_SOCK:-}', SSH_AGENT_PID='${SSH_AGENT_PID:-}'"
-    log "DEBUG: Main - Proceeding..."
+    log "DEBUG: Main - Proceeding to main menu loop..."
 
     # Main menu loop
     while true; do
         display_main_menu
         choice=$(get_menu_choice)
+        log "User selected menu option: [$choice]"
 
         case "$choice" in
             1)
-                check_and_set_ssh_dir
+                log_debug "Main loop - Case 1: Calling check_and_set_ssh_dir (Not Implemented Yet)"
+                # check_and_set_ssh_dir # TODO: Implement this
+                printf "Set SSH Directory functionality not yet implemented.\n" | tee -a "$LOG_FILE"
+                log_warn "Option 1 (Set SSH Directory) selected but not implemented."
+                log_debug "Main loop - Case 1: Calling wait_for_key..."
                 wait_for_key
                 ;;
             2)
-                log "DEBUG: Main loop - Calling list_current_keys..."
-                list_current_keys # Should now work as agent env is guaranteed
+                log_debug "Main loop - Case 2: Calling list_current_keys..."
+                list_current_keys
                 local list_rc=$?
-                log "DEBUG: Main loop - list_current_keys returned: $list_rc"
-                # No need to check list_rc here anymore if list_current_keys always returns 0 on success
-                log "DEBUG: Main loop - Calling wait_for_key..."
+                log_debug "Main loop - list_current_keys returned: $list_rc"
+                log_debug "Main loop - Case 2: Calling wait_for_key..."
                 wait_for_key
                 local wait_rc=$?
-                log "DEBUG: Main loop - wait_for_key returned: $wait_rc"
-                log "DEBUG: Main loop - Reached end of case 2 block."
+                log_debug "Main loop - wait_for_key returned: $wait_rc"
+                log_debug "Main loop - Reached end of case 2 block."
                 ;;
             3)
-                printf "Reloading all keys...\n"
+                log_debug "Main loop - Case 3: Reloading all keys..."
+                printf "Reloading all keys...\n" | tee -a "$LOG_FILE"
+                log_debug "Main loop - Case 3: Calling update_keys_list_file..."
                 if ! update_keys_list_file; then
-                    log_error "Failed to find keys in SSH directory."
-                    printf "Error: Failed to find keys to reload.\n" >&2
+                    log_error "Main loop - Case 3: update_keys_list_file failed (returned non-zero)."
+                    printf "Error: Failed to find keys to reload.\n" >&2 # Error already logged by function
                 else
+                    log_debug "Main loop - Case 3: update_keys_list_file succeeded."
                     # Only proceed if keys were found
+                    log_debug "Main loop - Case 3: Calling delete_keys_from_agent..."
                     delete_keys_from_agent
+                    local delete_rc=$?
+                    log_debug "Main loop - Case 3: delete_keys_from_agent returned $delete_rc"
+
+                    log_debug "Main loop - Case 3: Calling add_keys_to_agent..."
                     if ! add_keys_to_agent; then
-                        log_error "Failed to add one or more keys."
-                        printf "Error: Failed during key addition process.\n" >&2
-                        # Continue to wait_for_key even if add failed
+                       log_error "Main loop - Case 3: add_keys_to_agent failed (returned non-zero)."
+                       printf "Error: Failed during key addition process.\n" >&2 # Error already logged by function
+                       # Continue to wait_for_key even if add failed
+                    else
+                        log_debug "Main loop - Case 3: add_keys_to_agent succeeded."
                     fi
                 fi
+                log_debug "Main loop - Case 3: Calling wait_for_key..."
                 wait_for_key
                 ;;
             4)
+                log_debug "Main loop - Case 4: Calling display_log_location..."
                 display_log_location
+                log_debug "Main loop - Case 4: Calling wait_for_key..."
                 wait_for_key
                 ;;
             5)
+                log_debug "Main loop - Case 5: Calling delete_single_key..."
                 delete_single_key
+                log_debug "Main loop - Case 5: Calling wait_for_key..."
                 wait_for_key
                 ;;
             6)
+                log_debug "Main loop - Case 6: Calling delete_all_keys..."
                 delete_all_keys
+                log_debug "Main loop - Case 6: Calling wait_for_key..."
                 wait_for_key
                 ;;
             q|Q)
+                log_info "User selected Quit option."
+                log_debug "Main loop - Case q: Exiting script."
                 log "Script terminated by user"
-                printf "\nThank you for using SSH Key Manager. Goodbye!\n"
+                printf "\nThank you for using SSH Key Manager. Goodbye!\n" | tee -a "$LOG_FILE"
+                log "************* ENDING SCRIPT *************"
                 exit 0
                 ;;
+            *)
+                # This case should not be reachable due to get_menu_choice validation
+                log_error "Main loop - Reached unexpected default case for choice: $choice"
+                printf "Error: Unexpected menu choice processed!\n" >&2
+                sleep 2
+                ;;
         esac
+        log_debug "Main loop - End of loop iteration for choice: $choice"
     done
     log "************* ENDING SCRIPT *************"
 }
