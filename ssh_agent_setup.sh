@@ -499,108 +499,245 @@ _sa_add_keys_to_agent() {
     fi
 }
 
+# Function: _sa_write_valid_key_basenames_to_file (Internal version)
+# Description: Finds private keys by checking for corresponding .pub files and writes their basenames (one per line) to the specified file.
+# Input: Uses SSH_DIR
+# Argument $1: target_file - The file to write the basenames into.
+# Output: Writes to the target file. Returns 0 if keys found and written, 1 otherwise.
+_sa_write_valid_key_basenames_to_file() {
+    local target_file="$1"
+    log_debug "_sa_write_valid_key_basenames_to_file: Entering function. Target file: '$target_file'"
+
+    if [ -z "$target_file" ]; then
+        log_error "_sa_write_valid_key_basenames_to_file: No target file specified."
+        return 1
+    fi
+
+    log_info "_sa_write_valid_key_basenames_to_file: Finding private key files in $SSH_DIR and writing basenames to '$target_file'..."
+
+    local filename # Basename of the potential private key
+    local pub_filepath
+    local key_full_path
+
+    # Ensure the directory for the target file exists
+    local target_dir
+    target_dir=$(dirname "$target_file")
+    if [ ! -d "$target_dir" ]; then
+        log_debug "_sa_write_valid_key_basenames_to_file: Creating directory for target file: $target_dir"
+        if ! mkdir -p "$target_dir"; then
+            log_error "_sa_write_valid_key_basenames_to_file: Failed to create directory '$target_dir'. Cannot proceed."
+            return 1
+        fi
+        chmod 700 "$target_dir" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_dir"
+    fi
+
+    # Find potential private keys (files not ending in .pub)
+    # Process substitution <(...) reads the output of the find command line by line
+    log_debug "_sa_write_valid_key_basenames_to_file: Finding candidate files (excluding .pub)..."
+    local valid_key_basenames=() # Array to hold basenames
+    while IFS= read -r filename || [ -n "$filename" ]; do
+        [ -z "$filename" ] && continue # Skip empty lines
+
+        log_debug "_sa_write_valid_key_basenames_to_file: Checking candidate: $filename"
+        pub_filepath="$SSH_DIR/${filename}.pub"
+        key_full_path="$SSH_DIR/$filename" # Still need this to check private key exists
+
+        # Check if the corresponding .pub file exists and the private key file itself exists
+        if [ -f "$pub_filepath" ]; then
+            log_debug "_sa_write_valid_key_basenames_to_file:   Found matching pair: ${filename}.pub. Adding basename '$filename' to list."
+            # Append basename to the array
+            valid_key_basenames+=("$filename")
+        else
+            log_debug "_sa_write_valid_key_basenames_to_file:   No matching .pub file found at '$pub_filepath'. Skipping."
+        fi
+    # Use find to get basenames of files not ending in .pub
+    # Ensure find operates directly in SSH_DIR to avoid path issues with basename
+    done < <(find "$SSH_DIR" -maxdepth 1 -type f ! -name '*.pub' -exec basename {} \;)
+
+    log_debug "_sa_write_valid_key_basenames_to_file: Finished checking candidates."
+
+    if [ ${#valid_key_basenames[@]} -eq 0 ]; then
+        log_info "_sa_write_valid_key_basenames_to_file: No private keys with corresponding .pub files found in $SSH_DIR. Clearing target file."
+        # Clear the target file even if no keys are found
+        if ! :> "$target_file"; then # Using :> for truncation, safer than > potentially
+             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
+             return 1
+        fi
+        chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
+        return 1 # Indicate failure if no valid keys found
+    else
+        log_info "_sa_write_valid_key_basenames_to_file: Found ${#valid_key_basenames[@]} private key file(s). Writing to '$target_file'..."
+
+        # Clear the target file first
+        if ! :> "$target_file"; then
+             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
+             return 1
+        fi
+        chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
+
+        # Write the array elements one per line to the file
+        local basename
+        for basename in "${valid_key_basenames[@]}"; do
+            echo "$basename" >> "$target_file"
+            if [ $? -ne 0 ]; then
+                log_error "_sa_write_valid_key_basenames_to_file: Failed to write basename '$basename' to '$target_file'."
+                # Optionally decide whether to abort or continue
+                return 1 # Abort on first write error
+            fi
+        done
+        log_info "_sa_write_valid_key_basenames_to_file: Successfully wrote ${#valid_key_basenames[@]} basenames to '$target_file'."
+        return 0 # Success
+    fi
+}
+
 # --- Traps ---
 # Cleanup trap (currently does nothing for persistent list file)
 trap '_sa_cleanup' EXIT
 # Trap to log execution time (removed - called explicitly now)
 
-# --- Main Execution Logic (when sourced) ---
+# --- Main Execution Logic (now encapsulated in a function) ---
 
-log_debug "ssh_agent_setup.sh: Script sourced. Running setup logic..."
+sa_setup() {
+    log_debug "sa_setup: Main setup function invoked."
 
-# Argument Parsing for sourced script
-# Check for verbose flag first
-if [ "$#" -ge 1 ] && [[ "$1" == "-v" || "$1" == "--verbose" ]]; then
-    _sa_IS_VERBOSE="true"
-    # Logging might not be fully set up yet, but attempt debug log
-    log_debug "ssh_agent_setup.sh: Verbose logging enabled by argument."
-    shift # Remove the verbose flag from arguments
-fi
+    # Argument Parsing for sourced script
+    # Check for verbose flag first
+    if [ "$#" -ge 1 ] && [[ "$1" == "-v" || "$1" == "--verbose" ]]; then
+        _sa_IS_VERBOSE="true"
+        # Logging might not be fully set up yet, but attempt debug log
+        log_debug "sa_setup: Verbose logging enabled by argument."
+        shift # Remove the verbose flag from arguments
+    fi
 
-# Agent setup must happen regardless of other args
-if ! _sa_ensure_ssh_agent; then
-    log_error "ssh_agent_setup.sh: Failed to ensure SSH agent is running."
-    _sa_log_execution_time # Log time even on failure
-    return 1 # Use 'return' as this script is sourced
-fi
-log_debug "ssh_agent_setup.sh: Agent setup complete."
+    # Agent setup must happen regardless of other args
+    if ! _sa_ensure_ssh_agent; then
+        log_error "sa_setup: Failed to ensure SSH agent is running."
+        _sa_log_execution_time # Log time even on failure
+        return 1 # Return failure from this function
+    fi
+    log_debug "sa_setup: Agent setup complete."
 
-# --- Load keys ---
-LOAD_METHOD="scan" # Default: Scan SSH directory
-KEY_SOURCE_FILE=""
+    # --- Load keys ---
+    local LOAD_METHOD="scan" # Default: Scan SSH directory
+    local KEY_SOURCE_FILE=""
 
-# Check if a filename argument remains *after* potential verbose flag shift
-if [ "$#" -ge 1 ] && [ -n "$1" ]; then
-    log_debug "ssh_agent_setup.sh: Remaining argument provided: $1. Treating as key list file."
-    # Basic validation: Check if the provided argument is a readable file
-    if [ -f "$1" ] && [ -r "$1" ]; then
-        log_info "ssh_agent_setup.sh: Using provided file '$1' as source for key names."
-        LOAD_METHOD="file"
-        KEY_SOURCE_FILE="$1"
+    # Check if a filename argument remains *after* potential verbose flag shift
+    if [ "$#" -ge 1 ] && [ -n "$1" ]; then
+        log_debug "sa_setup: Remaining argument provided: $1. Treating as key list file."
+        # Basic validation: Check if the provided argument is a readable file
+        if [ -f "$1" ] && [ -r "$1" ]; then
+            log_info "sa_setup: Using provided file '$1' as source for key names."
+            LOAD_METHOD="file"
+            KEY_SOURCE_FILE="$1"
+        else
+            log_warn "sa_setup: Argument '$1' is not a readable file. Falling back to scanning $SSH_DIR."
+            # Keep LOAD_METHOD="scan"
+        fi
     else
-        log_warn "ssh_agent_setup.sh: Argument '$1' is not a readable file. Falling back to scanning $SSH_DIR."
+        log_debug "sa_setup: No filename argument provided. Scanning $SSH_DIR for keys."
         # Keep LOAD_METHOD="scan"
     fi
-else
-    log_debug "ssh_agent_setup.sh: No filename argument provided. Scanning $SSH_DIR for keys."
-    # Keep LOAD_METHOD="scan"
-fi
 
-# Populate the VALID_KEY_LIST_FILE based on the load method
-log_debug "ssh_agent_setup.sh: Populating key list using method: $LOAD_METHOD"
-if [ "$LOAD_METHOD" = "file" ]; then
-    # Copy contents from the source file, ensuring the list file is clear first
-    if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
-         log_error "ssh_agent_setup.sh: Cannot create or touch key list file '$VALID_KEY_LIST_FILE'. Check permissions."
-         # Attempt to continue without loading keys
-         VALID_KEY_LIST_FILE=""
-    else
-        chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "ssh_agent_setup.sh: Could not set permissions on $VALID_KEY_LIST_FILE"
-        # Clear the list file first
-        log_debug "ssh_agent_setup.sh: Clearing key list file: $VALID_KEY_LIST_FILE"
-        if command -v truncate > /dev/null; then
-            truncate -s 0 "$VALID_KEY_LIST_FILE"
-        else
-            echo -n > "$VALID_KEY_LIST_FILE"
-        fi
-        if [ $? -ne 0 ]; then
-             log_error "ssh_agent_setup.sh: Failed to clear key list file '$VALID_KEY_LIST_FILE'. Cannot load keys from file."
+    # Populate the VALID_KEY_LIST_FILE based on the load method
+    log_debug "sa_setup: Populating key list using method: $LOAD_METHOD"
+    if [ "$LOAD_METHOD" = "file" ]; then
+        # Copy contents from the source file, ensuring the list file is clear first
+        if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
+             log_error "sa_setup: Cannot create or touch key list file '$VALID_KEY_LIST_FILE'. Check permissions."
+             # Attempt to continue without loading keys
              VALID_KEY_LIST_FILE=""
         else
-             # Copy lines, skipping empty lines and comments
-             log_debug "ssh_agent_setup.sh: Copying key names from '$KEY_SOURCE_FILE' to '$VALID_KEY_LIST_FILE'"
-             grep -vE '^\s*(#|$)' "$KEY_SOURCE_FILE" >> "$VALID_KEY_LIST_FILE"
-             local copy_status=$?
-             if [ $copy_status -ne 0 ] && [ $copy_status -ne 1 ]; then # grep returns 1 if no lines selected
-                  log_error "ssh_agent_setup.sh: Failed to read from source key file '$KEY_SOURCE_FILE' (grep status: $copy_status)."
-                  VALID_KEY_LIST_FILE="" # Mark as unusable
-             fi
+            chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "sa_setup: Could not set permissions on $VALID_KEY_LIST_FILE"
+            # Clear the list file first
+            log_debug "sa_setup: Clearing key list file: $VALID_KEY_LIST_FILE"
+            if command -v truncate > /dev/null; then
+                truncate -s 0 "$VALID_KEY_LIST_FILE"
+            else
+                echo -n > "$VALID_KEY_LIST_FILE"
+            fi
+            if [ $? -ne 0 ]; then
+                 log_error "sa_setup: Failed to clear key list file '$VALID_KEY_LIST_FILE'. Cannot load keys from file."
+                 VALID_KEY_LIST_FILE=""
+            else
+                 # Copy lines, skipping empty lines and comments
+                 log_debug "sa_setup: Copying key names from '$KEY_SOURCE_FILE' to '$VALID_KEY_LIST_FILE'"
+                 grep -vE '^\s*(#|$)' "$KEY_SOURCE_FILE" >> "$VALID_KEY_LIST_FILE"
+                 local copy_status=$?
+                 if [ $copy_status -ne 0 ] && [ $copy_status -ne 1 ]; then # grep returns 1 if no lines selected
+                      log_error "sa_setup: Failed to read from source key file '$KEY_SOURCE_FILE' (grep status: $copy_status)."
+                      VALID_KEY_LIST_FILE="" # Mark as unusable
+                 fi
+            fi
+        fi
+    else # LOAD_METHOD is "scan"
+        # Use the existing function to scan the SSH directory
+        # NOTE: Using the function that *writes* to the file, not the one that echoes
+        log_debug "sa_setup: Calling _sa_write_valid_key_basenames_to_file to scan $SSH_DIR and populate '$VALID_KEY_LIST_FILE'..."
+        if ! _sa_write_valid_key_basenames_to_file "$VALID_KEY_LIST_FILE"; then
+            # No valid keys found by scanning, or error occurred writing file
+            log_info "sa_setup: No valid key files found in $SSH_DIR or update failed."
+            VALID_KEY_LIST_FILE="" # Mark as unusable
         fi
     fi
-else # LOAD_METHOD is "scan"
-    # Use the existing function to scan the SSH directory
-    log_debug "ssh_agent_setup.sh: Calling _sa_update_keys_list_file to scan $SSH_DIR..."
-    if ! _sa_update_keys_list_file; then
-        # No valid keys found by scanning, or error occurred
-        log_info "ssh_agent_setup.sh: No valid key files found in $SSH_DIR or update failed."
-        VALID_KEY_LIST_FILE="" # Mark as unusable
+
+    # Attempt to add keys from the populated list file (if usable)
+    # Also check if the number of keys in the agent matches the list to avoid redundant loads.
+    if [ -n "$VALID_KEY_LIST_FILE" ] && [ -f "$VALID_KEY_LIST_FILE" ] && [ -s "$VALID_KEY_LIST_FILE" ]; then
+        log_debug "sa_setup: Valid key list file found: $VALID_KEY_LIST_FILE. Checking agent key count..."
+
+        local agent_key_count=-1 # Default to -1 to indicate check hasn't run or failed
+        local file_key_count=0
+
+        # Get agent key count robustly using ssh-add -l (lists fingerprints)
+        ssh-add -l >/dev/null 2>&1
+        local agent_status=$?
+        if [ $agent_status -eq 0 ]; then
+            # Agent has keys
+            agent_key_count=$(ssh-add -l | wc -l)
+            log_debug "sa_setup: Keys currently in agent: $agent_key_count"
+        elif [ $agent_status -eq 1 ]; then
+            # Agent is running but has no keys
+            agent_key_count=0
+            log_debug "sa_setup: Agent has no keys currently loaded."
+        else
+            # Status 2 or higher: Error communicating with agent
+            log_warn "sa_setup: Could not communicate with agent (ssh-add -l status $agent_status) to check key count. Will attempt to add keys."
+            # Keep agent_key_count=-1 to force reload attempt
+        fi
+
+        # Get file key count (use cat to avoid error if file is empty, though -s check should prevent this)
+        file_key_count=$(cat "$VALID_KEY_LIST_FILE" | wc -l | awk '{print $1}')
+        log_debug "sa_setup: Keys found in list file '$VALID_KEY_LIST_FILE': $file_key_count"
+
+        # Compare counts if agent communication was successful (agent_key_count >= 0)
+        if [ "$agent_key_count" -ge 0 ] && [ "$agent_key_count" -eq "$file_key_count" ]; then
+            log_info "sa_setup: Agent key count ($agent_key_count) matches list file count ($file_key_count). Skipping redundant key loading."
+        else
+            # Counts differ or agent communication failed, attempt to add keys
+            if [ "$agent_key_count" -lt 0 ]; then
+                log_debug "sa_setup: Agent communication failed, proceeding with key add attempt."
+            else
+                log_info "sa_setup: Agent key count ($agent_key_count) differs from list file count ($file_key_count). Attempting to add keys..."
+            fi
+
+            log_debug "sa_setup: Calling _sa_add_keys_to_agent using list file '$VALID_KEY_LIST_FILE'..."
+            if ! _sa_add_keys_to_agent; then
+                log_warn "sa_setup: _sa_add_keys_to_agent reported failure or no keys added."
+                # This might be okay (e.g., all keys need passphrase), or might indicate issues.
+            fi
+        fi
+    else
+         log_warn "sa_setup: Key list file '$VALID_KEY_LIST_FILE' is not available or empty. Skipping key loading."
     fi
-fi
 
-# Attempt to add keys from the populated list file (if usable)
-if [ -n "$VALID_KEY_LIST_FILE" ] && [ -f "$VALID_KEY_LIST_FILE" ]; then
-    log_debug "ssh_agent_setup.sh: Calling _sa_add_keys_to_agent using list file '$VALID_KEY_LIST_FILE'..."
-    if ! _sa_add_keys_to_agent; then
-        log_warn "ssh_agent_setup.sh: _sa_add_keys_to_agent reported failure or no keys added."
-        # This might be okay (e.g., all keys need passphrase), or might indicate issues.
-    fi
-else
-     log_warn "ssh_agent_setup.sh: Key list file '$VALID_KEY_LIST_FILE' is not available. Skipping key loading."
-fi
+    # Log execution time before returning
+    _sa_log_execution_time
 
-# Log execution time before returning
-_sa_log_execution_time
+    log_debug "sa_setup: Reached end of main setup function. Final return 0 coming up."
+    log_debug "sa_setup: Setup complete."
+    return 0 # Indicate success from setup function
+}
 
-log_debug "ssh_agent_setup.sh: Reached end of main execution block. Final return 0 coming up."
-log_debug "ssh_agent_setup.sh: Setup complete."
-return 0 # Indicate success (even if keys failed to load, agent is running) 
+# --- Auto-execution Trigger ---
+# Call the main setup function, passing any arguments provided during sourcing.
+sa_setup "$@" 
