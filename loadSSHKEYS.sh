@@ -368,6 +368,35 @@ ensure_ssh_agent() {
     fi
 }
 
+# --- Help Function ---
+display_help() {
+    cat << EOF
+SSH Key Manager - $(basename "$0")
+
+Manages SSH keys in ssh-agent.
+
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  -l, --list      List keys currently loaded in the ssh-agent.
+  -a, --add       Add all keys from the SSH directory ($SSH_DIR) to the agent 
+                  (removes existing keys first).
+  -D, --delete-all Delete all keys currently loaded in the ssh-agent (prompts for confirmation).
+  -m, --menu      Show the interactive menu interface.
+  -h, --help      Display this help message and exit.
+
+Default Behavior:
+  If run without any options, this help message is displayed.
+
+Examples:
+  $(basename "$0") --list     # List loaded keys
+  $(basename "$0") --add      # Load all keys from $SSH_DIR
+  $(basename "$0") --delete-all # Delete all loaded keys
+  $(basename "$0") --menu     # Start the interactive menu
+
+EOF
+}
+
 # --- Core Functions ---
 update_keys_list_file() {
     log "Entering function: ${FUNCNAME[0]}"
@@ -896,12 +925,76 @@ delete_all_keys() {
     return $return_status
 }
 
-# --- Main Execution Logic ---
-main() {
-    # Initialize logging
-    if ! setup_logging; then
-        printf "Warning: Logging setup failed. Continuing with limited logging.\n" >&2
+# --- CLI Action Functions ---
+
+# Function to handle the --list action
+run_list_keys() {
+    log_info "CLI Action: Listing keys..."
+    # Logging already initialized
+    log_debug "run_list_keys: Validating SSH dir..."
+    if ! validate_ssh_dir; then exit 1; fi
+    log_debug "run_list_keys: Ensuring agent..."
+    if ! ensure_ssh_agent; then exit 1; fi
+
+    log_debug "run_list_keys: Calling list_current_keys..."
+    list_current_keys
+    local exit_status=$?
+    log_info "CLI Action: Listing keys finished with status $exit_status."
+    exit $exit_status
+}
+
+# Function to handle the --add action
+run_load_keys() {
+    log_info "CLI Action: Loading keys..."
+    # Logging already initialized
+    log_debug "run_load_keys: Validating SSH dir..."
+    if ! validate_ssh_dir; then exit 1; fi
+    log_debug "run_load_keys: Ensuring agent..."
+    if ! ensure_ssh_agent; then exit 1; fi
+
+    log_debug "run_load_keys: Calling update_keys_list_file..."
+    if ! update_keys_list_file; then
+        log_error "run_load_keys: update_keys_list_file failed."
+        exit 1
     fi
+
+    log_debug "run_load_keys: Calling delete_keys_from_agent..."
+    if ! delete_keys_from_agent; then
+        log_warn "run_load_keys: delete_keys_from_agent failed (continuing anyway)."
+        # Decide if this should be fatal? For now, continue to add attempt.
+    fi
+
+    log_debug "run_load_keys: Calling add_keys_to_agent..."
+    if ! add_keys_to_agent; then
+        log_error "run_load_keys: add_keys_to_agent failed."
+        exit 1
+    fi
+
+    log_info "CLI Action: Loading keys finished successfully."
+    exit 0
+}
+
+# Function to handle the --delete-all action
+run_delete_all_cli() {
+    log_info "CLI Action: Deleting all keys..."
+    # Logging already initialized
+    log_debug "run_delete_all_cli: Validating SSH dir..."
+    if ! validate_ssh_dir; then exit 1; fi
+    log_debug "run_delete_all_cli: Ensuring agent..."
+    if ! ensure_ssh_agent; then exit 1; fi
+
+    # Call the core delete function (which includes checks and confirmation)
+    log_debug "run_delete_all_cli: Calling delete_all_keys..."
+    delete_all_keys # This function handles user confirmation
+    local exit_status=$?
+
+    log_info "CLI Action: Delete all keys finished with status $exit_status."
+    exit $exit_status
+}
+
+# --- Main Execution Logic ---
+run_interactive_menu() {
+    # Logging already initialized by main script execution block
     log "************* STARTING SCRIPT *************"
     log_info "Script starting... PID: $$"
     log_info "Platform: $PLATFORM"
@@ -1027,5 +1120,65 @@ main() {
     log "************* ENDING SCRIPT *************"
 }
 
-# --- Run Main ---
-main
+# --- Argument Parsing and Dispatch ---
+
+# Initialize logging FIRST
+if ! setup_logging; then
+    printf "Warning: Logging setup failed. Continuing with limited logging.\n" >&2
+fi
+log_debug "Logging initialized. Proceeding with argument parsing."
+
+# Default action is help if no args or unknown args
+ACTION="help"
+
+# Simple argument parsing loop
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -l|--list)
+            ACTION="list"
+            shift # past argument
+            ;;
+        -a|--add)
+            ACTION="add"
+            shift # past argument
+            ;;
+        -D|--delete-all)
+            ACTION="delete-all"
+            shift # past argument
+            ;;
+        -m|--menu)
+            ACTION="menu"
+            shift # past argument
+            ;;
+        -h|--help)
+            ACTION="help"
+            shift # past argument
+            ;;
+        *)
+            # Unknown option
+            printf "Error: Unknown option '%s'\n\n" "$1" >&2
+            ACTION="help" # Show help on error
+            break # Stop processing further args on error
+            ;;
+    esac
+done
+
+# Execute the determined action
+case $ACTION in
+    list)
+        run_list_keys
+        ;;
+    add)
+        run_load_keys
+        ;;
+    menu)
+        run_interactive_menu
+        ;;
+    delete-all)
+        run_delete_all_cli
+        ;;
+    help|*)
+        display_help
+        exit 0 # Exit successfully after showing help
+        ;;
+esac
