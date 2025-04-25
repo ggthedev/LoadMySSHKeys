@@ -34,19 +34,22 @@ A comprehensive SSH key management tool that provides a menu-driven interface fo
 
 ## Installation
 
-1. Download the script:
+Download the script:
+
+   ```bash
+   curl -O https://raw.githubusercontent.com/ggthedev/ssh-key-manager/main/load_ssh_keys.sh
+   ```
+
+Make the script executable:
+
 ```bash
-curl -O https://raw.githubusercontent.com/ggthedev/ssh-key-manager/main/LOADSSHKey.sh
+chmod +x load_ssh_keys.sh
 ```
 
-2. Make the script executable:
-```bash
-chmod +x LOADSSHKey.sh
-```
+(Optional) Move to a directory in your PATH:
 
-3. (Optional) Move to a directory in your PATH:
 ```bash
-sudo mv LOADSSHKey.sh /usr/local/bin/ssh-key-manager
+sudo mv load_ssh_keys.sh /usr/local/bin/sshkeymanager
 ```
 
 ## Usage
@@ -54,8 +57,9 @@ sudo mv LOADSSHKey.sh /usr/local/bin/ssh-key-manager
 ### Basic Usage
 
 Run the script:
+
 ```bash
-./LOADSSHKey.sh
+./load_ssh_keys.sh
 ```
 
 ### Menu Options
@@ -100,9 +104,10 @@ The script provides the following menu options:
 ### Example Workflows
 
 #### 1. Initial Setup
+
 ```bash
 # Start the script
-./LOADSSHKey.sh
+./load_ssh_keys.sh
 
 # Set custom SSH directory (Option 1)
 Enter choice [1-6, q]: 1
@@ -131,6 +136,7 @@ Summary: 2 key(s) added, 1 key(s) failed
 ```
 
 #### 2. Key Management
+
 ```bash
 # List current keys (Option 2)
 Enter choice [1-6, q]: 2
@@ -150,29 +156,31 @@ Key successfully deleted.
 ```
 
 #### 3. Troubleshooting
+
 ```bash
 # Check log location (Option 4)
 Enter choice [1-6, q]: 4
 ----------------------
 |Log File Information|
 ----------------------
-Location: /Users/user/Library/Logs/sshkeygen/sshkeygen.log
+Location: /Users/user/Library/Logs/sshkeymanager/sshkeymanager.log
 Current Size: 45K
 
 # View log contents
-tail -f /Users/user/Library/Logs/sshkeygen/sshkeygen.log
+tail -f /Users/user/Library/Logs/sshkeymanager/sshkeymanager.log
 ```
 
 ## Logging
 
 The script maintains detailed logs of all operations:
 
-- **macOS**: `~/Library/Logs/sshkeygen/sshkeygen.log`
-- **Linux**: `/var/log/sshkeygen/sshkeygen.log` or `~/.local/log/sshkeygen/sshkeygen.log`
+- **macOS**: `~/Library/Logs/sshkeymanager/sshkeymanager.log`
+- **Linux**: `/var/log/sshkeymanager/sshkeymanager.log` or `~/.local/log/sshkeymanager/sshkeymanager.log`
 
 Log files are rotated when they reach 1MB in size, keeping up to 5 backup files.
 
 ### Log Format
+
 ```
 2024-03-14 10:30:45 - 12345 - INFO: Script starting
 2024-03-14 10:30:45 - 12345 - INFO: Platform: Darwin
@@ -193,6 +201,7 @@ The script includes comprehensive error handling:
 ### Common Error Messages
 
 1. **SSH Agent Not Running**:
+
 ```
 SSH agent is not running or not accessible.
 Would you like to:
@@ -201,11 +210,13 @@ Would you like to:
 ```
 
 2. **Permission Issues**:
+
 ```
 Error: SSH directory '/path/to/ssh' is not writable
 ```
 
 3. **Key Loading Failures**:
+
 ```
 Failed to add key: id_rsa (status: 1)
 ```
@@ -262,6 +273,7 @@ Common issues and solutions:
 ### Debug Mode
 
 To enable debug output, set the `IS_VERBOSE` variable to "true" in the script:
+
 ```bash
 declare IS_VERBOSE="true"
 ```
