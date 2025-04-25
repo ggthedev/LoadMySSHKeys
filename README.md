@@ -276,7 +276,7 @@ Contributions are welcome! Please follow these steps:
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
 
 ## Author
 
@@ -289,3 +289,12 @@ This project is licensed under the MIT License - see the LICENSE file for detail
   - Basic key management functionality
   - Cross-platform support
   - Logging system
+
+## `ssh_agent_setup.sh` - Automated Agent Setup (for Sourcing)
+
+This script is designed to be **sourced** by your shell's startup files (preferably `.zprofile` or `.profile`) to ensure a single `ssh-agent` is running per login session and that necessary environment variables (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`) are exported correctly for process inheritance.
+
+### Purpose
+
+- Ensures a single `ssh-agent` is running per login session.
+- Exports `SSH_AUTH_SOCK` and `SSH_AGENT_PID` for use by subsequent processes.
