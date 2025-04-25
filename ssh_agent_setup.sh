@@ -40,7 +40,7 @@
 _sa_script_start_time=$(date +%s.%N) # Use %s.%N for nanoseconds if supported
 
 # Treat unset variables as errors
-set -u
+#set -u
 
 # --- Configuration ---
 declare SSH_DIR="$HOME/.ssh"
@@ -62,6 +62,8 @@ declare _sa_IS_VERBOSE="false"
 declare LOG_FILE="" # Initialize empty; will be set if logging is configured successfully
 
 _setup_default_logging() {
+    set -u # Enable strict mode for this function
+
     local target_log_path
     local log_dir
     local platform
@@ -92,18 +94,21 @@ _setup_default_logging() {
     # Attempt to create directory and file
     if ! mkdir -p "$log_dir" 2>/dev/null; then
         # Cannot create directory, logging remains disabled
-        LOG_FILE="" # Ensure it's empty
+        LOG_FILE=""
+        set +u # Disable strict mode before returning
         return 1
     fi
     if ! touch "$target_log_path" 2>/dev/null; then
         # Cannot create file, logging remains disabled
-        LOG_FILE="" # Ensure it's empty
+        LOG_FILE=""
+        set +u # Disable strict mode before returning
         return 1
     fi
 
     # Set log file path and permissions if successful
     LOG_FILE="$target_log_path"
     chmod 600 "$LOG_FILE" 2>/dev/null || true # Best effort on chmod
+    set +u # Disable strict mode before returning
     return 0
 }
 
@@ -153,11 +158,11 @@ log_debug() {
 
 # Cleanup function for trap
 _sa_cleanup() {
-  if [ -n "$VALID_KEY_LIST_FILE" ] && [ -f "$VALID_KEY_LIST_FILE" ]; then
+  # Use parameter expansion default to handle potentially unset variable with set -u
+  if [ -n "${VALID_KEY_LIST_FILE:-}" ] && [ -f "${VALID_KEY_LIST_FILE:-}" ]; then
     # Decide if we should remove the persistent list file on exit?
     # For now, let's keep it as it caches the valid keys found.
     # log_debug "_sa_cleanup: Removing key list file $VALID_KEY_LIST_FILE"
-    # rm -f "$VALID_KEY_LIST_FILE"
     : # No cleanup needed for the persistent file
   fi
 }
@@ -214,19 +219,24 @@ _sa_log_execution_time() {
 # Input: Uses exported SSH_AUTH_SOCK, SSH_AGENT_PID
 # Output: 0 if agent is accessible, 1 otherwise.
 _sa_check_ssh_agent() {
+    set -u # Enable strict mode for this function
+
     log_debug "_sa_check_ssh_agent: Checking agent status... (PID='${SSH_AGENT_PID:-}', SOCK='${SSH_AUTH_SOCK:-}')"
     if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
         log_debug "_sa_check_ssh_agent: Required environment variables not set."
+        set +u # Disable strict mode before returning
         return 1
     fi
     # Check if the socket file exists
     if [ ! -S "$SSH_AUTH_SOCK" ]; then
         log_error "_sa_check_ssh_agent: SSH_AUTH_SOCK is not a socket: $SSH_AUTH_SOCK"
+        set +u # Disable strict mode before returning
         return 1
     fi
     # Check if the agent process is running
     if ! ps -p "$SSH_AGENT_PID" > /dev/null 2>&1; then
         log_error "_sa_check_ssh_agent: SSH_AGENT_PID ($SSH_AGENT_PID) process not running."
+        set +u # Disable strict mode before returning
         return 1
     fi
     # Check communication with the agent
@@ -236,9 +246,11 @@ _sa_check_ssh_agent() {
     log_debug "_sa_check_ssh_agent: ssh-add -l communication status: $check_status"
     if [ "$check_status" -eq 0 ] || [ "$check_status" -eq 1 ]; then
         log_debug "_sa_check_ssh_agent: Agent communication successful (status $check_status)."
+        set +u # Disable strict mode before returning
         return 0 # Success
     fi
     log_error "_sa_check_ssh_agent: Cannot communicate with agent (ssh-add -l status $check_status)."
+    set +u # Disable strict mode before returning
     return 1 # Failure
 }
 
@@ -247,6 +259,8 @@ _sa_check_ssh_agent() {
 # Input: None
 # Output: Exports SSH_AUTH_SOCK, SSH_AGENT_PID. Returns 0 on success, 1 on failure.
 _sa_ensure_ssh_agent() {
+    set -u # Enable strict mode for this function
+
     log_debug "_sa_ensure_ssh_agent: Entering function."
 
     # 1. Check if already configured and working in this environment
@@ -255,6 +269,7 @@ _sa_ensure_ssh_agent() {
         log_info "_sa_ensure_ssh_agent: Agent already running and sourced (PID: $SSH_AGENT_PID)."
         # Ensure they are exported, just in case they weren't initially
         export SSH_AUTH_SOCK SSH_AGENT_PID
+        set +u # Disable strict mode before returning
         return 0
     fi
     log_debug "_sa_ensure_ssh_agent: Agent not valid in current environment."
@@ -272,6 +287,7 @@ _sa_ensure_ssh_agent() {
             log_info "_sa_ensure_ssh_agent: Sourcing persistent file successful. Reusing agent (PID: $SSH_AGENT_PID)."
             # Ensure they are exported
             export SSH_AUTH_SOCK SSH_AGENT_PID
+            set +u # Disable strict mode before returning
             return 0
         else
             log_warn "_sa_ensure_ssh_agent: Persistent file found but agent invalid/inaccessible after sourcing. Removing stale file."
@@ -287,13 +303,18 @@ _sa_ensure_ssh_agent() {
     log_info "_sa_ensure_ssh_agent: Starting new ssh-agent..."
 
     # Ensure .ssh directory exists
-    if ! mkdir -p "$SSH_DIR" 2>/dev/null; then log_error "_sa_ensure_ssh_agent: Failed to create SSH directory $SSH_DIR"; return 1; fi
+    if ! mkdir -p "$SSH_DIR" 2>/dev/null; then
+        log_error "_sa_ensure_ssh_agent: Failed to create SSH directory $SSH_DIR"
+        set +u # Disable strict mode before returning
+        return 1
+    fi
     if ! chmod 700 "$SSH_DIR" 2>/dev/null; then log_warn "_sa_ensure_ssh_agent: Failed to set permissions on $SSH_DIR"; fi
 
     # Start ssh-agent and capture output
     local agent_output
     if ! agent_output=$(ssh-agent -s); then
         log_error "_sa_ensure_ssh_agent: Failed to execute ssh-agent -s"
+        set +u # Disable strict mode before returning
         return 1
     fi
     log_debug "_sa_ensure_ssh_agent: ssh-agent -s output captured."
@@ -305,6 +326,7 @@ _sa_ensure_ssh_agent() {
 
     if [ -z "$new_sock" ] || [ -z "$new_pid" ]; then
         log_error "_sa_ensure_ssh_agent: Failed to extract env vars from output: $agent_output"
+        set +u # Disable strict mode before returning
         return 1
     fi
     log_debug "_sa_ensure_ssh_agent: Extracted SOCK=$new_sock PID=$new_pid"
@@ -329,12 +351,14 @@ _sa_ensure_ssh_agent() {
     log_debug "_sa_ensure_ssh_agent: Performing final verification of new agent..."
     if _sa_check_ssh_agent; then
         log_info "_sa_ensure_ssh_agent: New agent started and verified successfully (PID: $SSH_AGENT_PID)."
+        set +u # Disable strict mode before returning
         return 0 # Success!
     else
         log_error "_sa_ensure_ssh_agent: Started new agent but failed final verification."
         # Clean up potentially bad environment state
         unset SSH_AUTH_SOCK SSH_AGENT_PID
         rm -f "$AGENT_ENV_FILE" # Remove possibly bad file
+        set +u # Disable strict mode before returning
         return 1 # Failure!
     fi
 }
@@ -425,6 +449,8 @@ _sa_update_keys_list_file() {
 # Input: Uses SSH_DIR, VALID_KEY_LIST_FILE
 # Output: Returns 0 on success (even if some keys failed but agent call succeeded), 1 on major failure.
 _sa_add_keys_to_agent() {
+    set -u # Enable strict mode for this function
+
     log_debug "_sa_add_keys_to_agent: Entering function (single call version)."
     log_info "_sa_add_keys_to_agent: Preparing to add keys listed in $VALID_KEY_LIST_FILE..."
     local keyfile
@@ -436,6 +462,7 @@ _sa_add_keys_to_agent() {
     # Check if VALID_KEY_LIST_FILE exists and is non-empty
     if [ ! -s "$VALID_KEY_LIST_FILE" ]; then
         log_warn "_sa_add_keys_to_agent: Key list file ($VALID_KEY_LIST_FILE) is empty or does not exist. No keys to add."
+        set +u # Disable strict mode before returning
         return 1 # Nothing to add
     fi
 
@@ -459,6 +486,7 @@ _sa_add_keys_to_agent() {
 
     if [ ${#key_paths_to_add[@]} -eq 0 ]; then
         log_warn "_sa_add_keys_to_agent: No valid key file paths found to add after reading list."
+        set +u # Disable strict mode before returning
         return 1 # Nothing valid to add
     fi
 
@@ -483,6 +511,7 @@ _sa_add_keys_to_agent() {
     if [ $ssh_add_status -eq 0 ]; then
         log_info "_sa_add_keys_to_agent: ssh-add reported success (status 0). Assumed all specified keys added."
         log_debug "_sa_add_keys_to_agent: Exiting function (status: 0)."
+        set +u # Disable strict mode before returning
         return 0
     elif [ $ssh_add_status -eq 1 ]; then
         # Status 1 implies some keys failed, often due to passphrases.
@@ -490,11 +519,13 @@ _sa_add_keys_to_agent() {
         log_warn "_sa_add_keys_to_agent: ssh-add reported partial failure (status 1). Some keys might require passphrase or be invalid."
         log_warn "ssh-add output (if any): $ssh_add_output"
         log_debug "_sa_add_keys_to_agent: Exiting function (status: 0 - partial success treated as OK for setup)."
+        set +u # Disable strict mode before returning
         return 0 # Treat partial success as OK for setup purposes
     else # Status 2 or other errors
         log_error "_sa_add_keys_to_agent: ssh-add failed (status: $ssh_add_status). Could not add keys."
         log_error "ssh-add output (if any): $ssh_add_output"
         log_debug "_sa_add_keys_to_agent: Exiting function (status: 1 - failure)."
+        set +u # Disable strict mode before returning
         return 1 # Major failure
     fi
 }
@@ -505,11 +536,14 @@ _sa_add_keys_to_agent() {
 # Argument $1: target_file - The file to write the basenames into.
 # Output: Writes to the target file. Returns 0 if keys found and written, 1 otherwise.
 _sa_write_valid_key_basenames_to_file() {
+    set -u # Enable strict mode for this function
+
     local target_file="$1"
     log_debug "_sa_write_valid_key_basenames_to_file: Entering function. Target file: '$target_file'"
 
     if [ -z "$target_file" ]; then
         log_error "_sa_write_valid_key_basenames_to_file: No target file specified."
+        set +u # Disable strict mode before returning
         return 1
     fi
 
@@ -526,6 +560,7 @@ _sa_write_valid_key_basenames_to_file() {
         log_debug "_sa_write_valid_key_basenames_to_file: Creating directory for target file: $target_dir"
         if ! mkdir -p "$target_dir"; then
             log_error "_sa_write_valid_key_basenames_to_file: Failed to create directory '$target_dir'. Cannot proceed."
+            set +u # Disable strict mode before returning
             return 1
         fi
         chmod 700 "$target_dir" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_dir"
@@ -561,9 +596,11 @@ _sa_write_valid_key_basenames_to_file() {
         # Clear the target file even if no keys are found
         if ! :> "$target_file"; then # Using :> for truncation, safer than > potentially
              log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
+             set +u # Disable strict mode before returning
              return 1
         fi
         chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
+        set +u # Disable strict mode before returning
         return 1 # Indicate failure if no valid keys found
     else
         log_info "_sa_write_valid_key_basenames_to_file: Found ${#valid_key_basenames[@]} private key file(s). Writing to '$target_file'..."
@@ -571,6 +608,7 @@ _sa_write_valid_key_basenames_to_file() {
         # Clear the target file first
         if ! :> "$target_file"; then
              log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
+             set +u # Disable strict mode before returning
              return 1
         fi
         chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
@@ -582,10 +620,12 @@ _sa_write_valid_key_basenames_to_file() {
             if [ $? -ne 0 ]; then
                 log_error "_sa_write_valid_key_basenames_to_file: Failed to write basename '$basename' to '$target_file'."
                 # Optionally decide whether to abort or continue
+                set +u # Disable strict mode before returning
                 return 1 # Abort on first write error
             fi
         done
         log_info "_sa_write_valid_key_basenames_to_file: Successfully wrote ${#valid_key_basenames[@]} basenames to '$target_file'."
+        set +u # Disable strict mode before returning
         return 0 # Success
     fi
 }
@@ -598,6 +638,8 @@ trap '_sa_cleanup' EXIT
 # --- Main Execution Logic (now encapsulated in a function) ---
 
 sa_setup() {
+    set -u # Enable strict mode for this function
+
     log_debug "sa_setup: Main setup function invoked."
 
     # Argument Parsing for sourced script
@@ -613,6 +655,7 @@ sa_setup() {
     if ! _sa_ensure_ssh_agent; then
         log_error "sa_setup: Failed to ensure SSH agent is running."
         _sa_log_execution_time # Log time even on failure
+        set +u # Disable strict mode before returning
         return 1 # Return failure from this function
     fi
     log_debug "sa_setup: Agent setup complete."
@@ -735,6 +778,7 @@ sa_setup() {
 
     log_debug "sa_setup: Reached end of main setup function. Final return 0 coming up."
     log_debug "sa_setup: Setup complete."
+    set +u # Disable strict mode before returning
     return 0 # Indicate success from setup function
 }
 
