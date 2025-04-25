@@ -25,8 +25,14 @@
 # License: MIT
 #
 
+# Capture start time for execution duration logging
+script_start_time=$(date +%s.%N) # Use %s.%N for nanoseconds if supported, fallback needed if not
+
 # Strict error handling: exit on error, treat unset variables as error, fail pipelines on first error
 set -euo pipefail
+
+# Flag to control verbose/debug logging
+declare IS_VERBOSE="false"
 
 # --- Configuration Section ---
 # Platform-specific configurations
@@ -64,9 +70,6 @@ if ! KEYS_LIST_TMP=$(mktemp "${TMPDIR:-/tmp}/ssh_keys_list.XXXXXX"); then
     printf "Error: Failed to create temporary file. Please check your system's temporary directory permissions.\n" >&2
     exit 1
 fi
-
-# Flag to control verbose output
-declare IS_VERBOSE="true" # Default to verbose for menu-driven interface
 
 # --- Cleanup trap ---
 trap 'rm -f "$KEYS_LIST_TMP"' EXIT
@@ -139,6 +142,8 @@ log_warn() {
 }
 
 log_debug() {
+    # Only log if verbose mode is enabled
+    [ "$IS_VERBOSE" = "true" ] || return 0
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     if [ "$LOG_FILE" != "/dev/null" ]; then
         echo "$timestamp - $$ - DEBUG: $1" >> "$LOG_FILE"
@@ -388,6 +393,7 @@ Options:
                   '#' comments and blank lines ignored).
   -D, --delete-all Delete all keys currently loaded in the ssh-agent (prompts for confirmation).
   -m, --menu      Show the interactive menu interface.
+  -v, --verbose   Enable verbose (DEBUG level) logging to the log file.
   -h, --help      Display this help message and exit.
 
 Default Behavior:
@@ -1199,6 +1205,32 @@ run_interactive_menu() {
     log "************* ENDING SCRIPT *************"
 }
 
+# --- Finalization Function ---
+
+log_execution_time() {
+    local end_time script_duration
+    if [[ -n "$script_start_time" ]]; then
+        end_time=$(date +%s.%N)
+        # Use bc for floating point calculation if available
+        if command -v bc > /dev/null; then
+            script_duration=$(echo "$end_time - $script_start_time" | bc -l)
+            printf -v script_duration "%.3f" "$script_duration" # Format to 3 decimal places
+        else
+            # Fallback to integer seconds if bc is not available
+            local start_seconds end_seconds
+            start_seconds=$(date -jf %s.%N "$script_start_time" +%s)
+            end_seconds=$(date -jf %s.%N "$end_time" +%s)
+            script_duration=$((end_seconds - start_seconds))
+            log_warn "'bc' command not found, reporting execution time in integer seconds."
+        fi
+        log_info "Total script execution time: ${script_duration} seconds."
+    fi
+}
+
+# Trap EXIT signal to ensure execution time is logged on exit
+# This will run *in addition* to the _sa_cleanup trap if both are active
+trap 'log_execution_time' EXIT
+
 # --- Argument Parsing and Dispatch ---
 
 # Initialize logging FIRST
@@ -1239,6 +1271,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         -m|--menu)
             ACTION="menu"
+            shift # past argument
+            ;;
+        -v|--verbose)
+            IS_VERBOSE="true"
+            log_debug "Verbose logging enabled by CLI flag."
             shift # past argument
             ;;
         -h|--help)
