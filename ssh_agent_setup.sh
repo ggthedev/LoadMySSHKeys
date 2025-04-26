@@ -69,8 +69,8 @@ declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeymanager/ssh_keys_list"  # Persi
 declare LOG_FILENAME="sshkeymanager.log"
 # Platform-specific log directory preferences:
 declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeymanager"
-declare LOG_DIR_LINUX_VAR="/var/log/sshkeysloader"
-declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeysloader"
+declare LOG_DIR_LINUX_VAR="/var/log/sshkeymanager"
+declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeymanager"
 declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"                             # Fallback if others fail
 
 # --- Logging Setup ---
