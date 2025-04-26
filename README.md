@@ -232,6 +232,16 @@ Failed to add key: id_rsa (status: 1)
 
 ## Troubleshooting
 
+### Configuration via Environment Variables
+
+Certain paths used by the script can be overridden by setting environment variables before running the script:
+
+- `SKM_SSH_DIR`: Overrides the default SSH directory (`~/.ssh`).
+- `SKM_LOG_DIR`: Overrides the default log directory (platform-specific).
+- `SKM_LOG_FILENAME`: Overrides the default log filename (`sshkeygen.log`).
+- `SKM_AGENT_ENV_FILE`: Overrides the default agent environment file path (`~/.ssh/agent.env`).
+- `SKM_VALID_KEYS_FILE`: Overrides the default path for the cached list of valid key basenames (`~/.config/sshkeymanager/ssh_keys_list`).
+
 Common issues and solutions:
 
 1. **SSH Agent Not Starting**:

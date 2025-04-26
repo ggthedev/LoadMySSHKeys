@@ -60,15 +60,15 @@ declare _sa_IS_VERBOSE="false"
 # These variables define key locations used throughout the script.
 
 declare SSH_DIR="$HOME/.ssh"                                         # Standard SSH directory
-declare AGENT_ENV_FILE="$HOME/.config/sshkeysloader/agent.env"       # File to store/read agent connection details
-declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeysloader/.ssh_keys"  # Persistent file to cache list of valid key *basenames*
+declare AGENT_ENV_FILE="$HOME/.config/sshkeymanager/agent.env"       # File to store/read agent connection details
+declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeymanager/ssh_keys_list"  # Persistent file to cache list of valid key *basenames*
 
 # --- Log File Configuration Variables ---
 # Define standard names and potential directory locations for the log file.
 
-declare LOG_FILENAME="sshkeysloader.log"
+declare LOG_FILENAME="sshkeymanager.log"
 # Platform-specific log directory preferences:
-declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeysloader"
+declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeymanager"
 declare LOG_DIR_LINUX_VAR="/var/log/sshkeysloader"
 declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeysloader"
 declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"                             # Fallback if others fail
