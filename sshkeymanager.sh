@@ -260,17 +260,12 @@ check_ssh_agent() {
         log_debug "check_ssh_agent: SSH_AUTH_SOCK ('$SSH_AUTH_SOCK') is not a valid socket."; return 1;
     fi
     if ! ps -p "$SSH_AGENT_PID" > /dev/null 2>&1; then
-        log_error "check_ssh_agent: Agent process PID '$SSH_AGENT_PID' not running."; return 1;
+        log_debug "check_ssh_agent: Agent process PID '$SSH_AGENT_PID' not running."; return 1;
     fi
-    # Check communication
-    ssh-add -l > /dev/null 2>&1 || true
-    local exit_code=${PIPESTATUS[0]:-$?}
-    log_debug "check_ssh_agent: ssh-add -l exit code: $exit_code"
-    if [ $exit_code -eq 0 ] || [ $exit_code -eq 1 ]; then
-        log_debug "Agent communication successful (exit code $exit_code)."; return 0;
-    else
-        log_error "check_ssh_agent: Cannot communicate with agent (ssh-add -l exit code $exit_code)."; return 1;
-    fi
+    # For non-invasive checks (like -l), skip the communication check (ssh-add -l).
+    # Simply checking for socket + process existence is sufficient.
+    log_debug "check_ssh_agent: Socket exists and process PID found. Assuming agent is usable for check purposes."
+    return 0
 }
 
 ensure_ssh_agent() {
@@ -307,15 +302,42 @@ ensure_ssh_agent() {
         log_error "Failed to execute ssh-agent -s."; return 1;
     fi
     log_debug "ssh-agent -s output captured."
-    # Extract and export vars
-    eval "$agent_output" > /dev/null # Use eval to export directly
+    # Parse and export vars safely, avoiding eval
+    local ssh_auth_sock ssh_agent_pid
+    # Extract SSH_AUTH_SOCK value
+    ssh_auth_sock=$(echo "$agent_output" | grep 'SSH_AUTH_SOCK=' | cut -d'=' -f2 | cut -d';' -f1)
+    # Extract SSH_AGENT_PID value
+    ssh_agent_pid=$(echo "$agent_output" | grep 'SSH_AGENT_PID=' | cut -d'=' -f2 | cut -d';' -f1)
+
+    # Check if extraction was successful
+    if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
+        # If extraction failed, export directly using the extracted values
+        if [ -n "$ssh_auth_sock" ] && [ -n "$ssh_agent_pid" ]; then
+            export SSH_AUTH_SOCK="$ssh_auth_sock"
+            export SSH_AGENT_PID="$ssh_agent_pid"
+        else 
+            # If parsing itself failed, log error and return
+            log_error "Failed to parse/export vars from ssh-agent output."; return 1;
+        fi
+    else
+        # If eval worked (or vars were somehow set), ensure they are exported
+        # This branch is less likely needed now with manual parsing, but keep for safety
+        export SSH_AUTH_SOCK
+        export SSH_AGENT_PID
+    fi
+
+    # Re-check if vars are properly set after attempted export
     if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
         log_error "Failed to parse/export vars from ssh-agent output."; return 1;
     fi
     log_info "Extracted new agent details: SOCK=$SSH_AUTH_SOCK PID=$SSH_AGENT_PID"
     # Save to persistent file
     log_debug "Saving agent environment to $AGENT_ENV_FILE"
-    echo "$agent_output" > "$AGENT_ENV_FILE" # Save the raw output for sourcing
+    { 
+        echo "SSH_AUTH_SOCK='$SSH_AUTH_SOCK'; export SSH_AUTH_SOCK;" 
+        echo "SSH_AGENT_PID=$SSH_AGENT_PID; export SSH_AGENT_PID;" 
+        echo "# Agent details saved on $(date)"
+    } > "$AGENT_ENV_FILE"
     chmod 600 "$AGENT_ENV_FILE" || log_warn "Failed to set permissions on $AGENT_ENV_FILE"
     log_info "Agent environment saved to $AGENT_ENV_FILE."
     sleep 0.5 # Give agent a moment
@@ -656,13 +678,56 @@ delete_all_keys() {
     return $return_status
 }
 
+# --- Internal Helper for Listing ---
+_perform_list_keys_check() {
+    log_debug "Entering function: ${FUNCNAME[0]}"
+    local agent_found_list_check=0
+    # Check current env first
+    log_debug "_perform_list_keys_check: Checking current env..."
+    if check_ssh_agent; then
+        agent_found_list_check=1
+    # If not in env, check file
+    elif [ -f "$AGENT_ENV_FILE" ]; then
+        log_debug "_perform_list_keys_check: Sourcing $AGENT_ENV_FILE..."
+        # Source into current scope for potential use by list_current_keys
+        # shellcheck disable=SC1090
+        . "$AGENT_ENV_FILE" >/dev/null 
+        if check_ssh_agent; then
+             log_info "_perform_list_keys_check: Found valid agent via sourced file."
+             agent_found_list_check=1
+        else
+            log_debug "_perform_list_keys_check: Agent invalid after sourcing file."
+        fi
+    else
+         log_debug "_perform_list_keys_check: Agent not in env and no agent file found."
+    fi
+
+    if [ "$agent_found_list_check" -eq 1 ]; then
+        log_info "_perform_list_keys_check: Agent found, calling list_current_keys."
+        # Call the actual listing function, which handles its own errors/output
+        list_current_keys
+        return $? # Return status of list_current_keys
+    else
+        log_info "_perform_list_keys_check: No usable agent found."
+        printf "No running SSH agent found to list keys from.\n"
+        # For CLI context (-l), add hint
+        # Check if we are likely in the CLI context (check $ACTION?)
+        # Or just always print hint? Let's always print for now.
+        printf "Hint: Ensure agent is running or start the menu with '%s --menu'\n" "$(basename "$0")"
+        return 1 # Indicate failure to list keys due to no agent
+    fi
+}
+
 # --- CLI Action Functions ---
 run_list_keys() {
     log_info "CLI Action: Listing keys..."
+    log_debug "Entering function: ${FUNCNAME[0]}"
+    log_debug "run_list_keys: Validating SSH dir..."
     if ! validate_ssh_dir; then exit 1; fi
-    if ! ensure_ssh_agent; then exit 1; fi
-    list_current_keys
-    exit $? # Exit with the status of list_current_keys
+
+    # Call the consolidated check/list function
+    _perform_list_keys_check
+    exit $? # Exit with the status returned by the helper function
 }
 
 run_load_keys() {
@@ -765,8 +830,7 @@ run_interactive_menu() {
     log_info "Starting SSH Key Manager in Interactive Mode..."
     # Validate SSH directory and ensure agent is running
     if ! validate_ssh_dir; then log_error "Exiting: SSH directory validation failed."; exit 1; fi
-    if ! ensure_ssh_agent; then log_error "Exiting: Failed to ensure SSH agent is running."; exit 1; fi
-    log_info "Agent setup complete. SOCK='${SSH_AUTH_SOCK:-}', PID='${SSH_AGENT_PID:-}'"
+    # Agent will be ensured specifically for actions that require it (3, 5, 6)
     local choice list_rc delete_rc # Local variables for the loop
     while true; do
         display_main_menu
@@ -778,30 +842,56 @@ run_interactive_menu() {
                 log_warn "Option 1 (Set SSH Directory) selected but not implemented."
                 wait_for_key ;;
             2)  # List Keys
-                list_current_keys
+                log_debug "Main loop - Case 2: Checking for agent..."
+                # Call the consolidated check/list function
+                _perform_list_keys_check || true
+                # Helper function handles printing messages
+                # Ignore return status in menu? Or display error?
+                # For now, just call it and then wait.
                 wait_for_key ;;
             3)  # Reload All Keys
                 printf "Reloading all keys (using simple find)...\n"
                 log_info "Reloading all keys selected (uses find -> delete -> add)."
-                if ! update_keys_list_file; then
-                    log_error "Failed to find keys to reload." # Error already printed by func
+                log_debug "Menu Reload Keys: Ensuring agent is running..."
+                if ! ensure_ssh_agent; then 
+                    log_error "Cannot reload keys: Failed to ensure SSH agent is running."
+                    # ensure_ssh_agent already prints user message via log_error
                 else
-                    log_debug "Copying found keys from temp file $KEYS_LIST_TMP to $VALID_KEY_LIST_FILE"
-                    cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE" || { log_error "Failed to copy temp key list."; }
-                    log_info "Deleting existing keys before adding..."
-                    delete_keys_from_agent # Ignore error?
-                    log_info "Adding keys found by find..."
-                    add_keys_to_agent # Log error if failed?
+                    # Agent is confirmed running, proceed with reload logic
+                    if ! update_keys_list_file; then
+                        log_error "Failed to find keys to reload." # Error already printed by func
+                    else
+                        log_debug "Copying found keys from temp file $KEYS_LIST_TMP to $VALID_KEY_LIST_FILE"
+                        cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE" || { log_error "Failed to copy temp key list."; }
+                        log_info "Deleting existing keys before adding..."
+                        delete_keys_from_agent # Ignore error?
+                        log_info "Adding keys found by find..."
+                        add_keys_to_agent # Log error if failed?
+                    fi
                 fi
                 wait_for_key ;;
             4)  # Display Log Location
                 display_log_location
                 wait_for_key ;;
             5)  # Delete Single Key
-                delete_single_key
+                log_debug "Main loop - Case 5: Calling delete_single_key..."
+                log_debug "Menu Delete Single Key: Ensuring agent is running..."
+                if ! ensure_ssh_agent; then
+                     log_error "Cannot delete single key: Failed to ensure SSH agent is running."
+                else
+                    # Agent confirmed running, proceed
+                    delete_single_key
+                fi
                 wait_for_key ;;
             6)  # Delete All Keys
-                delete_all_keys # Handles confirmation internally
+                log_debug "Main loop - Case 6: Calling delete_all_keys..."
+                log_debug "Menu Delete All Keys: Ensuring agent is running..."
+                if ! ensure_ssh_agent; then
+                     log_error "Cannot delete all keys: Failed to ensure SSH agent is running."
+                else
+                    # Agent confirmed running, proceed
+                    delete_all_keys # Handles confirmation internally
+                fi
                 wait_for_key ;;
             q|Q) # Quit
                 log_info "User selected Quit."
