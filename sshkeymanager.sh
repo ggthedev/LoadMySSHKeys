@@ -15,9 +15,9 @@
 # - Menu-driven interface for key management
 # - Cross-platform support (macOS and Linux)
 # - Automatic ssh-agent management
-# - Key loading from SSH directory
+# - Key loading from SSH directory (simple find or specified list)
 # - Individual and bulk key deletion
-# - Comprehensive logging system
+# - Comprehensive logging system with rotation
 # - Directory validation and management
 #
 # Author: [Your Name]
@@ -25,103 +25,142 @@
 # License: MIT
 #
 
-# --- Script Initialization ---
-_script_start_time=$(date +%s.%N) # Use %s.%N for nanoseconds if supported
-set -euo pipefail
+# ==============================================================================
+# --- Script Initialization and Global Configuration ---
+# ==============================================================================
+
+_script_start_time=$(date +%s) # Record script start time for duration calculation (portable seconds).
+set -euo pipefail              # Exit on error, unset variable, or pipe failure.
 
 # --- Global Variable Declarations ---
+# These variables are used throughout the script. Default values are provided,
+# and some can be overridden by environment variables (e.g., SKM_LOG_DIR).
 
 # Control Flags
-declare IS_VERBOSE="false"
+declare IS_VERBOSE="false"      # Set to "true" by -v/--verbose for debug logging.
 
 # Logging Configuration
-declare LOG_FILE="/dev/null" # Default: Ensure variable exists for traps
-declare LOG_FILENAME="${SKM_LOG_FILENAME:-sshkeymanager.log}"
+declare LOG_FILE="/dev/null"    # Default log destination (disabled). Set by setup_logging.
+declare LOG_FILENAME="${SKM_LOG_FILENAME:-sshkeymanager.log}" # Log filename. Env override: SKM_LOG_FILENAME.
 # Platform-specific log directory preferences (used in setup_logging):
-declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeymanager"
-declare LOG_DIR_LINUX_VAR="/var/log/sshkeymanager"
-declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeymanager"
-declare LOG_DIR_FALLBACK="$HOME/.ssh/logs" # Fallback if others fail
+declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeymanager" # macOS preferred log directory.
+declare LOG_DIR_LINUX_VAR="/var/log/sshkeymanager"       # Linux system-wide log directory.
+declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeymanager" # Linux user-local log directory.
+declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"               # Fallback log directory if others fail.
 # Actual LOG_DIR will be determined in setup_logging
 declare LOG_DIR=""
 
 # Platform Detection & Platform-Specific Settings
 declare PLATFORM
-PLATFORM=$(uname -s)
-declare STAT_CMD
+PLATFORM=$(uname -s) # Detect Operating System (e.g., "Darwin", "Linux").
+declare STAT_CMD     # Command to get file size (differs between platforms).
 case "$PLATFORM" in
     "Darwin")
-        STAT_CMD="stat -f %z"
+        STAT_CMD="stat -f %z" # macOS stat command for size in bytes.
         ;;
     "Linux")
-        STAT_CMD="stat -c %s"
+        STAT_CMD="stat -c %s" # Linux stat command for size in bytes.
         ;;
     *)
-        STAT_CMD="stat -c %s" # Default to Linux style
+        # Default to Linux style for other *nix systems, might need adjustment.
+        STAT_CMD="stat -c %s"
         ;;
 esac
 
 # Core Application Paths
-declare SSH_DIR="${SKM_SSH_DIR:-$HOME/.ssh}"
-declare VALID_KEY_LIST_FILE="${SKM_VALID_KEYS_FILE:-$HOME/.config/sshkeymanager/ssh_keys_list}"
-declare AGENT_ENV_FILE="${SKM_AGENT_ENV_FILE:-$HOME/.config/agent.env}"
+declare SSH_DIR="${SKM_SSH_DIR:-$HOME/.ssh}" # SSH directory path. Env override: SKM_SSH_DIR.
+# File storing the list of key basenames to be loaded by add_keys_to_agent.
+declare VALID_KEY_LIST_FILE="${SKM_VALID_KEYS_FILE:-$HOME/.config/sshkeymanager/ssh_keys_list}" # Env override: SKM_VALID_KEYS_FILE.
+# File storing the running ssh-agent environment variables for persistence.
+declare AGENT_ENV_FILE="${SKM_AGENT_ENV_FILE:-$HOME/.config/agent.env}" # Env override: SKM_AGENT_ENV_FILE.
 
-# Temporary File (Declared here, created in main())
-declare KEYS_LIST_TMP=""
+# Temporary File (Declared globally, created in main())
+declare KEYS_LIST_TMP="" # Path to the temporary file used for listing keys found by `find`.
 
 # Script Action State (Set by argument parsing in main())
-declare ACTION="help" # Default action
-declare source_key_file=""
+declare ACTION="help"       # Default action if no arguments are provided.
+declare source_key_file="" # Stores the filename provided with the -f/--file option.
 
+# ==============================================================================
 # --- Function Definitions ---
+# ==============================================================================
 
+# ------------------------------------------------------------------------------
 # --- Logging Functions ---
-setup_logging() {
-    local max_log_size=1048576  # 1MB
-    local max_log_files=5
+# ------------------------------------------------------------------------------
 
-    # Determine LOG_DIR based on platform and environment override
-    # Use SKM_LOG_DIR env var if set, otherwise determine based on platform
+# --- setup_logging ---
+#
+# @description Configures the logging system for the script.
+#              Determines the appropriate log directory based on platform and
+#              environment variables, creates the directory if needed, sets
+#              the LOG_FILE global variable, touches the log file, performs
+#              log rotation if the file exceeds a size limit, and sets file
+#              permissions. If logging setup fails at any critical step, it
+#              defaults LOG_FILE to /dev/null, disabling logging.
+# @arg        None
+# @set        LOG_DIR Global variable containing the chosen log directory path.
+# @set        LOG_FILE Global variable containing the full log file path.
+# @return     0 If logging setup is successful.
+# @return     1 If logging setup fails (e.g., cannot create directory/file).
+# @prints     Warnings to stderr if directories/files cannot be created or accessed.
+#             Debug messages to stdout if IS_VERBOSE is true during initial setup.
+# @stdout     None (except potential debug messages).
+# @stderr     Warnings on failure.
+# @depends    Global variables: SKM_LOG_DIR, PLATFORM, LOG_DIR_MACOS,
+#             LOG_DIR_LINUX_VAR, LOG_DIR_LINUX_LOCAL, LOG_DIR_FALLBACK,
+#             LOG_FILENAME, IS_VERBOSE, STAT_CMD.
+#             External commands: mkdir, printf, touch, stat (via STAT_CMD),
+#             mv, seq, chmod, date.
+# ---
+setup_logging() {
+    local max_log_size=1048576  # Max log size in bytes (1MB).
+    local max_log_files=5       # Number of rotated log files to keep (e.g., .1, .2, ..., .5).
+
+    # Determine LOG_DIR based on environment override or platform defaults.
     if [ -n "${SKM_LOG_DIR:-}" ]; then
          LOG_DIR="$SKM_LOG_DIR"
-         # Log this choice later, after LOG_FILE is potentially usable
+         # Log this choice later, after LOG_FILE is potentially usable and log_debug works.
     else
         case "$PLATFORM" in
             "Darwin")
                 LOG_DIR="$LOG_DIR_MACOS"
                 ;;
             "Linux")
-                # Prefer /var/log if writable, else local user log
-                if [ -w "$LOG_DIR_LINUX_VAR" ]; then
+                # Prefer system log directory if writable, otherwise use user's local log directory.
+                if [ -w "$LOG_DIR_LINUX_VAR" ] 2>/dev/null; then # Check writability silently first
                      LOG_DIR="$LOG_DIR_LINUX_VAR"
                 else
+                     # If system dir isn't writable or doesn't exist, try user dir.
                      LOG_DIR="$LOG_DIR_LINUX_LOCAL"
                 fi
                 ;;
             *)
-                LOG_DIR="$LOG_DIR_FALLBACK" # Default for other systems
+                # Fallback for other platforms.
+                LOG_DIR="$LOG_DIR_FALLBACK"
                 ;;
         esac
     fi
 
-    local initial_log_dir="$LOG_DIR" # Store determined dir for messages
+    local initial_log_dir="$LOG_DIR" # Store determined dir for potential warning messages.
 
-    # Create log directory if it doesn't exist
+    # Attempt to create the determined log directory.
     if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
         printf "Warning: Could not create log directory '$initial_log_dir'. Trying fallback '$LOG_DIR_FALLBACK'.\\n" >&2
         LOG_DIR="$LOG_DIR_FALLBACK"
+        # Attempt to create the fallback directory.
         if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
             printf "Warning: Could not create fallback log directory. Logging disabled.\\n" >&2
-            LOG_FILE="/dev/null" # Ensure it stays /dev/null
-            return 1
+            LOG_FILE="/dev/null" # Ensure logging is disabled.
+            return 1 # Indicate failure.
         fi
+         printf "Warning: Using fallback log directory '$LOG_DIR'.\\n" >&2 # Inform user about fallback
     fi
 
-    # Now LOG_DIR should be valid, set the LOG_FILE path
-    # This assignment makes LOG_FILE potentially usable by subsequent logging calls
+    # At this point, LOG_DIR should be a valid, created directory. Set LOG_FILE path.
     LOG_FILE="${LOG_DIR}/${LOG_FILENAME}"
 
-    # Use printf for initial messages as log_debug might not work if IS_VERBOSE isn't set yet
+    # Use printf for initial debug messages as log_debug might not work yet if IS_VERBOSE wasn't set early.
     if [ "$IS_VERBOSE" = "true" ]; then printf "DEBUG: Determined log directory: %s\\n" "$LOG_DIR"; fi
     if [ "$IS_VERBOSE" = "true" ]; then printf "DEBUG: Attempting log file: %s\\n" "$LOG_FILE"; fi
 
@@ -129,28 +168,35 @@ setup_logging() {
     if ! touch "$LOG_FILE" 2>/dev/null; then
         printf "Warning: Could not create log file '%s'. Logging disabled.\\n" "$LOG_FILE" >&2
         LOG_FILE="/dev/null" # Reset to /dev/null on failure
-        return 1
+        return 1 # Indicate failure.
     fi
 
-    # Rotate logs if needed
+    # Rotate logs if the current log file exists and exceeds the size limit.
     if [ -f "$LOG_FILE" ]; then
         local log_size
+        # Get log file size using the platform-specific command.
         if ! log_size=$($STAT_CMD "$LOG_FILE" 2>/dev/null); then
-            printf "Warning: Could not determine log file size. Log rotation disabled.\\n" >&2
+            printf "Warning: Could not determine size of log file '%s'. Log rotation skipped.\\n" "$LOG_FILE" >&2
         elif [ "$log_size" -gt "$max_log_size" ]; then
+            # Log rotation needed.
             if [ "$IS_VERBOSE" = "true" ]; then printf "DEBUG: Rotating logs (size %s > %s)...\\n" "$log_size" "$max_log_size"; fi
+            # Shift existing rotated logs (log.5 -> log.6 (deleted implicitly), log.4 -> log.5, ..., log.1 -> log.2).
             for i in $(seq $((max_log_files-1)) -1 1); do
-                [ -f "${LOG_FILE}.${i}" ] && mv "${LOG_FILE}.${i}" "${LOG_FILE}.$((i+1))" 2>/dev/null || true
+                [ -f "${LOG_FILE}.${i}" ] && mv -f "${LOG_FILE}.${i}" "${LOG_FILE}.$((i+1))" 2>/dev/null || true
             done
-            mv "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
-            touch "$LOG_FILE" # Create new empty log file
+            # Move the current log file to log.1.
+            mv -f "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+            # Create a new empty log file.
+            touch "$LOG_FILE" 2>/dev/null || printf "Warning: Failed to create new log file after rotation: %s\\n" "$LOG_FILE" >&2
         fi
     fi
 
-    chmod 600 "$LOG_FILE" 2>/dev/null || true
-    # Now log_debug should work if IS_VERBOSE is true
+    # Set log file permissions to be readable/writable only by the owner.
+    chmod 600 "$LOG_FILE" 2>/dev/null || printf "Warning: Could not set permissions (600) on log file: %s\\n" "$LOG_FILE" >&2
+
+    # Now log_debug should work reliably if IS_VERBOSE is true.
     log_debug "Logging setup complete. LOG_FILE set to: $LOG_FILE"
-    return 0
+    return 0 # Indicate success.
 } # END setup_logging
 
 log() {
@@ -205,25 +251,50 @@ log_info() {
     fi
 }
 
+# ------------------------------------------------------------------------------
 # --- Validation Functions ---
+# ------------------------------------------------------------------------------
+
+# --- validate_directory ---
+#
+# @description Checks if a given directory exists and has the necessary
+#              read, write, and execute permissions. Logs errors if checks fail.
+# @arg         $1 String Path to the directory to validate.
+# @arg         $2 String Description of the directory (e.g., "SSH", "Log") for error messages.
+# @return     0 If the directory exists and has required permissions.
+# @return     1 If any validation check fails.
+# @stdout      None
+# @stderr      None (errors logged via log_error).
+# @depends     Function: log_debug, log_error.
+# ---
 validate_directory() {
     log_debug "Entering function: ${FUNCNAME[0]} (Dir: $1, Desc: $2)"
     local dir="$1"
     local description="$2"
-    local return_status=0
+    local return_status=0 # Assume success initially
+
+    # Perform checks in sequence. If one fails, set status and log, but continue checks.
     if [ ! -d "$dir" ]; then
         log_error "Validation failed: $description directory '$dir' does not exist."
         return_status=1
-    elif [ ! -r "$dir" ]; then
-        log_error "Validation failed: $description directory '$dir' is not readable."
-        return_status=1
-    elif [ ! -w "$dir" ]; then
-        log_error "Validation failed: $description directory '$dir' is not writable."
-        return_status=1
-    elif [ ! -x "$dir" ]; then
-        log_error "Validation failed: $description directory '$dir' is not accessible."
-        return_status=1
+    # Only check permissions if the directory exists.
     else
+        if [ ! -r "$dir" ]; then
+            log_error "Validation failed: $description directory '$dir' is not readable."
+            return_status=1
+        fi
+        # Note: Write permission check might not always be necessary depending on usage.
+        if [ ! -w "$dir" ]; then
+            log_error "Validation failed: $description directory '$dir' is not writable."
+            return_status=1
+        fi
+        if [ ! -x "$dir" ]; then
+            log_error "Validation failed: $description directory '$dir' is not accessible."
+            return_status=1
+        fi
+    fi
+
+    if [ "$return_status" -eq 0 ]; then
         log_debug "Validation successful for '$dir' ($description)."
     fi
     log_debug "Exiting function: ${FUNCNAME[0]} (Dir: $1, Status: $return_status)"
@@ -238,7 +309,8 @@ validate_ssh_dir() {
         printf "Attempting to create SSH directory '%s'...\n" "$SSH_DIR"
         if ! mkdir -p "$SSH_DIR"; then
             log_error "Failed to create SSH directory '$SSH_DIR'."
-            return 1
+            printf "Error: Failed to create SSH directory '%s'. Check permissions.\n" "$SSH_DIR" >&2
+            return 1 # Creation failed.
         fi
         log_info "Successfully created SSH directory '$SSH_DIR'."
         printf "Successfully created SSH directory '%s'.\n" "$SSH_DIR"
@@ -249,21 +321,52 @@ validate_ssh_dir() {
     return 0
 }
 
+# ------------------------------------------------------------------------------
 # --- SSH Agent Management Functions ---
+# ------------------------------------------------------------------------------
+
+# --- check_ssh_agent ---
+#
+# @description Performs checks to determine if a seemingly valid ssh-agent
+#              is running and accessible via the current environment variables
+#              (SSH_AUTH_SOCK, SSH_AGENT_PID).
+#              Checks for existence of the socket file and the agent process.
+#              Does *not* attempt to communicate with the agent (e.g., via ssh-add -l)
+#              to avoid potential blocking or side effects during simple checks.
+# @arg        None
+# @uses       Global environment variables: SSH_AUTH_SOCK, SSH_AGENT_PID.
+# @return     0 If SSH_AUTH_SOCK and SSH_AGENT_PID are set, the socket exists,
+#               and the process associated with SSH_AGENT_PID is running.
+# @return     1 If any of the checks fail.
+# @stdout      None
+# @stderr      None (status logged via log_debug).
+# @depends     Function: log_debug. External command: ps.
+# ---
 check_ssh_agent() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     log_debug "Checking agent status... (PID='${SSH_AGENT_PID:-}', SOCK='${SSH_AUTH_SOCK:-}')"
+
+    # Check if required environment variables are set.
     if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
-        log_debug "check_ssh_agent: Required SSH_AUTH_SOCK or SSH_AGENT_PID not set."; return 1;
+        log_debug "check_ssh_agent: Required SSH_AUTH_SOCK or SSH_AGENT_PID not set."
+        return 1;
     fi
+
+    # Check if the socket path points to an actual socket file.
     if [ ! -S "$SSH_AUTH_SOCK" ]; then
-        log_debug "check_ssh_agent: SSH_AUTH_SOCK ('$SSH_AUTH_SOCK') is not a valid socket."; return 1;
+        log_debug "check_ssh_agent: SSH_AUTH_SOCK ('$SSH_AUTH_SOCK') is not a valid socket."
+        return 1;
     fi
+
+    # Check if the process ID stored in SSH_AGENT_PID corresponds to a running process.
+    # Redirect stdout and stderr to /dev/null for a silent check.
     if ! ps -p "$SSH_AGENT_PID" > /dev/null 2>&1; then
-        log_debug "check_ssh_agent: Agent process PID '$SSH_AGENT_PID' not running."; return 1;
+        log_debug "check_ssh_agent: Agent process PID '$SSH_AGENT_PID' not running."
+        return 1;
     fi
-    # For non-invasive checks (like -l), skip the communication check (ssh-add -l).
-    # Simply checking for socket + process existence is sufficient.
+
+    # If all checks pass, assume the agent is likely usable.
+    # Note: Communication could still fail, but this is a good basic check.
     log_debug "check_ssh_agent: Socket exists and process PID found. Assuming agent is usable for check purposes."
     return 0
 }
@@ -272,8 +375,8 @@ ensure_ssh_agent() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     log_info "Ensuring SSH agent is active..."
     if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -n "${SSH_AGENT_PID:-}" ] && check_ssh_agent; then
-        log_info "Agent already running and sourced (PID: ${SSH_AGENT_PID:-})."
-        printf "SSH agent is already running (PID: %s).\n" "${SSH_AGENT_PID:-Unknown}"
+        log_info "Agent already running and sourced (PID: ${SSH_AGENT_PID:-Unknown})."
+        printf "SSH agent is already running (PID: %s).\\n" "${SSH_AGENT_PID:-Unknown}"
         export SSH_AUTH_SOCK SSH_AGENT_PID # Ensure exported
         return 0
     fi
@@ -283,18 +386,19 @@ ensure_ssh_agent() {
         # shellcheck disable=SC1090
         . "$AGENT_ENV_FILE" >/dev/null
         if check_ssh_agent; then
-            log_info "Sourced persistent file. Reusing agent (PID: ${SSH_AGENT_PID:-})."
-            printf "Successfully connected to existing ssh-agent (PID: %s).\n" "${SSH_AGENT_PID:-Unknown}"
+            log_info "Sourced persistent file. Reusing agent (PID: ${SSH_AGENT_PID:-Unknown})."
+            printf "Successfully connected to existing ssh-agent (PID: %s).\\n" "${SSH_AGENT_PID:-Unknown}"
             export SSH_AUTH_SOCK SSH_AGENT_PID # Ensure exported
             return 0
         else
             log_debug "Agent file '$AGENT_ENV_FILE' found but agent invalid after sourcing. Removing stale file."
             rm -f "$AGENT_ENV_FILE"
+            # Unset potentially invalid variables sourced from the stale file.
             unset SSH_AUTH_SOCK SSH_AGENT_PID
         fi
     fi
     log_info "Starting new ssh-agent..."
-    printf "Starting new ssh-agent...\n"
+    printf "Starting new ssh-agent...\\n"
     if ! mkdir -p "$HOME/.ssh"; then log_error "Failed to create $HOME/.ssh directory."; return 1; fi
     chmod 700 "$HOME/.ssh" || log_warn "Failed to set permissions on $HOME/.ssh"
     local agent_output
@@ -309,99 +413,158 @@ ensure_ssh_agent() {
     # Extract SSH_AGENT_PID value
     ssh_agent_pid=$(echo "$agent_output" | grep 'SSH_AGENT_PID=' | cut -d'=' -f2 | cut -d';' -f1)
 
-    # Check if extraction was successful
-    if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
-        # If extraction failed, export directly using the extracted values
-        if [ -n "$ssh_auth_sock" ] && [ -n "$ssh_agent_pid" ]; then
-            export SSH_AUTH_SOCK="$ssh_auth_sock"
-            export SSH_AGENT_PID="$ssh_agent_pid"
-        else 
-            # If parsing itself failed, log error and return
-            log_error "Failed to parse/export vars from ssh-agent output."; return 1;
-        fi
+    # Export the extracted variables directly.
+    if [ -n "$ssh_auth_sock" ] && [ -n "$ssh_agent_pid" ]; then
+        export SSH_AUTH_SOCK="$ssh_auth_sock"
+        export SSH_AGENT_PID="$ssh_agent_pid"
+        log_info "Extracted and exported new agent details: SOCK=$SSH_AUTH_SOCK PID=$SSH_AGENT_PID"
     else
-        # If eval worked (or vars were somehow set), ensure they are exported
-        # This branch is less likely needed now with manual parsing, but keep for safety
-        export SSH_AUTH_SOCK
-        export SSH_AGENT_PID
+        log_error "Failed to parse SSH_AUTH_SOCK or SSH_AGENT_PID from ssh-agent output."
+        log_debug "ssh-agent output was: $agent_output"
+        return 1;
     fi
 
-    # Re-check if vars are properly set after attempted export
-    if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
-        log_error "Failed to parse/export vars from ssh-agent output."; return 1;
-    fi
-    log_info "Extracted new agent details: SOCK=$SSH_AUTH_SOCK PID=$SSH_AGENT_PID"
-    # Save to persistent file
+    # Save the new agent environment to the persistent file.
     log_debug "Saving agent environment to $AGENT_ENV_FILE"
-    { 
-        echo "SSH_AUTH_SOCK='$SSH_AUTH_SOCK'; export SSH_AUTH_SOCK;" 
-        echo "SSH_AGENT_PID=$SSH_AGENT_PID; export SSH_AGENT_PID;" 
-        echo "# Agent details saved on $(date)"
-    } > "$AGENT_ENV_FILE"
-    chmod 600 "$AGENT_ENV_FILE" || log_warn "Failed to set permissions on $AGENT_ENV_FILE"
-    log_info "Agent environment saved to $AGENT_ENV_FILE."
-    sleep 0.5 # Give agent a moment
+    # Create parent directory for AGENT_ENV_FILE if it doesn't exist.
+    local agent_env_dir
+    agent_env_dir=$(dirname "$AGENT_ENV_FILE")
+    if ! mkdir -p "$agent_env_dir"; then
+        log_warn "Could not create directory '$agent_env_dir' for agent environment file. Agent persistence disabled."
+    else
+        # Write the export commands to the file. Quoting SSH_AUTH_SOCK is important if path contains spaces.
+        {
+            echo "SSH_AUTH_SOCK='$SSH_AUTH_SOCK'; export SSH_AUTH_SOCK;"
+            echo "SSH_AGENT_PID=$SSH_AGENT_PID; export SSH_AGENT_PID;"
+            echo "# Agent details saved on $(date)"
+        } > "$AGENT_ENV_FILE"
+        chmod 600 "$AGENT_ENV_FILE" || log_warn "Failed to set permissions on $AGENT_ENV_FILE"
+        log_info "Agent environment saved to $AGENT_ENV_FILE."
+    fi
+
+    # Final verification of the newly started agent.
+    sleep 0.5 # Give the agent a brief moment to initialize fully.
     if check_ssh_agent; then
         log_info "New agent started and verified successfully."
-        printf "Successfully started new ssh-agent (PID: %s).\n" "$SSH_AGENT_PID"
+        printf "Successfully started new ssh-agent (PID: %s).\\n" "$SSH_AGENT_PID"
         return 0
     else
-        log_error "Started new agent but failed final verification!"
+        # This shouldn't typically happen if ssh-agent succeeded, but check just in case.
+        log_error "Started new agent but failed final verification check!"
+        printf "Error: Started ssh-agent but failed final verification.\\n" >&2
         unset SSH_AUTH_SOCK SSH_AGENT_PID
-        rm -f "$AGENT_ENV_FILE"
+        rm -f "$AGENT_ENV_FILE" # Clean up potentially bad env file.
         return 1
     fi
 }
 
+# ------------------------------------------------------------------------------
 # --- Core Key Management Functions ---
+# ------------------------------------------------------------------------------
+
+# --- update_keys_list_file ---
+#
+# @description Scans the $SSH_DIR for potential private key files using `find`
+#              and writes their basenames to the temporary file specified by
+#              the global $KEYS_LIST_TMP variable.
+#              The `find` command attempts to exclude common non-key files like
+#              `known_hosts`, `authorized_keys`, `config`, and files with extensions
+#              (like `.pub`). This is a basic heuristic and might include invalid
+#              keys or exclude valid ones with unusual names.
+# @arg        None
+# @modifies   Overwrites the temporary file $KEYS_LIST_TMP with found key basenames.
+# @return     0 If at least one potential key file is found.
+# @return     1 If no potential key files are found.
+# @prints     Status messages to stdout indicating the number of keys found.
+# @stdout     Count of potential key files found.
+# @stderr     None (errors logged).
+# @depends    Global variables: SSH_DIR, KEYS_LIST_TMP, PLATFORM.
+#             Functions: log_debug, log_info.
+#             External commands: printf, find, wc.
+# ---
 update_keys_list_file() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    log_info "Finding potential private key files in $SSH_DIR..."
-    log_debug "Clearing temporary key list file: $KEYS_LIST_TMP"
-    > "$KEYS_LIST_TMP"
+    log_info "Finding potential private key files in $SSH_DIR using 'find'..."
+
+    # Ensure the temporary file exists and is empty before writing.
+    if [ -z "$KEYS_LIST_TMP" ] || ! > "$KEYS_LIST_TMP"; then
+        log_error "Temporary key list file ($KEYS_LIST_TMP) is not set or not writable."
+        printf "Error: Cannot prepare temporary file for key list.\\n" >&2
+        return 1
+    fi
+    log_debug "Cleared temporary key list file: $KEYS_LIST_TMP"
+
     log_debug "Running find command for platform $PLATFORM..."
-    # Using simplified find, potentially excluding password-protected or incompatible keys.
-    # Excludes files with extensions, known_hosts, authorized_keys, config.
+    # Use platform-specific `find` syntax.
+    # Exclude common non-private-key files.
+    # -maxdepth 1: Don't search subdirectories.
+    # -type f: Only find files.
+    # ! -name ...: Exclude specific filenames or patterns.
+    #   '*.*': Excludes files with extensions (like .pub, potentially others).
+    # -exec basename {} \; (macOS): Print only the filename.
+    # -printf '%f\\n' (Linux): Print only the filename, followed by a newline.
     if [[ "$PLATFORM" == "Darwin" ]]; then
         find "$SSH_DIR" -maxdepth 1 -type f \
             ! -name 'known_hosts*' ! -name 'authorized_keys*' ! -name '*.*' ! -name 'config' \
-            -exec basename {} \; > "$KEYS_LIST_TMP"
-    else
+            -exec basename {} \; > "$KEYS_LIST_TMP" 2>/dev/null || { log_error "find command failed on Darwin."; return 1; }
+    else # Linux or other
         find "$SSH_DIR" -maxdepth 1 -type f \
             ! -name 'known_hosts*' ! -name 'authorized_keys*' ! -name '*.*' ! -name 'config' \
-            -printf '%f\n' > "$KEYS_LIST_TMP"
+            -printf '%f\\n' > "$KEYS_LIST_TMP" 2>/dev/null || { log_error "find command failed on Linux/other."; return 1; }
     fi
+
+    # Count the number of lines (keys) found.
     local key_count
     key_count=$(wc -l < "$KEYS_LIST_TMP")
+    # Remove leading whitespace from wc output if necessary (though `<` redirection usually avoids this).
+    key_count=${key_count##* }
+
     log_info "Found $key_count potential key entries in temp file $KEYS_LIST_TMP."
     if [ "$key_count" -eq 0 ]; then
-        printf "No potential SSH key files found in %s\n" "$SSH_DIR"
+        printf "No potential SSH private key files found in %s (using find filters).\\n" "$SSH_DIR"
         log_info "No potential SSH key files found in $SSH_DIR using find logic."
+        # Return 1 indicating no keys found, but not necessarily an error in the process.
         return 1
     else
-        printf "Found %d potential key file(s) in %s (written to temp list).\n" "$key_count" "$SSH_DIR"
+        printf "Found %d potential key file(s) in %s (written to temp list %s).\\n" "$key_count" "$SSH_DIR" "$KEYS_LIST_TMP"
         return 0
     fi
 }
 
 delete_keys_from_agent() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    log_info "Attempting to delete all keys from ssh-agent..."
-    ssh-add -D || true
-    local del_status=${PIPESTATUS[0]:-$?}
+    log_info "Attempting to delete all keys from ssh-agent (ssh-add -D)..."
+
+    # Execute ssh-add -D. Capture stderr to prevent it cluttering user output if desired,
+    # but allow command failure to be detected by PIPESTATUS. `|| true` prevents script exit
+    # if `set -e` is active and ssh-add fails.
+    ssh-add -D >/dev/null 2>&1 || true
+    local del_status=${PIPESTATUS[0]:-$?} # Get exit status of ssh-add.
+
     log_debug "ssh-add -D exit status: $del_status"
-    if [ "$del_status" -eq 0 ]; then
-        log_info "All keys successfully deleted from agent."
-        printf "All keys successfully deleted from agent.\n"
-        return 0
-    elif [ "$del_status" -eq 1 ]; then
-        log_info "No keys found in agent to delete (status: $del_status)."
-        printf "No keys found in agent to delete.\n"
-        return 0 # Treat as success
-    else
-        log_error "Failed to delete keys from agent (ssh-add -D status: $del_status)."
-        return 1
-    fi
+    case "$del_status" in
+        0) # Success: Keys were deleted.
+            log_info "All keys successfully deleted from agent."
+            printf "All keys successfully deleted from agent.\\n"
+            return 0
+            ;;
+        1) # Common "error": No identities found in the agent.
+            log_info "No keys found in agent to delete (ssh-add -D status: 1)."
+            printf "No keys found in agent to delete.\\n"
+            # Treat this as success because the state (no keys) is achieved.
+            return 0
+            ;;
+        2) # Error: Could not connect to the agent.
+            log_error "Failed to delete keys: Could not connect to agent (ssh-add -D status: 2)."
+            printf "Error: Could not connect to the SSH agent.\\n" >&2
+            return 1
+            ;;
+        *) # Other unexpected errors.
+            log_error "Failed to delete keys from agent (ssh-add -D status: $del_status)."
+            printf "Error: Failed to delete keys from agent (Code: %s).\\n" "$del_status" >&2
+            return 1
+            ;;
+    esac
 }
 
 add_keys_to_agent() {
@@ -409,7 +572,7 @@ add_keys_to_agent() {
     log_info "Adding keys listed in $VALID_KEY_LIST_FILE..."
     if [ ! -s "$VALID_KEY_LIST_FILE" ]; then
         log_error "Key list file '$VALID_KEY_LIST_FILE' is empty or missing."
-        printf "Key list file '%s' is empty or does not exist. Cannot add keys.\n" "$VALID_KEY_LIST_FILE"
+        printf "Key list file '%s' is empty or does not exist. Cannot add keys.\\n" "$VALID_KEY_LIST_FILE"
         return 1
     fi
     printf "Adding SSH keys to agent (using list: %s)...\n" "$VALID_KEY_LIST_FILE"
@@ -417,7 +580,7 @@ add_keys_to_agent() {
     while IFS= read -r keyfile || [[ -n "$keyfile" ]]; do
         [ -z "$keyfile" ] && continue
         key_path="$SSH_DIR/$keyfile"
-        log_debug "Processing key entry: $keyfile (Path: $key_path)"
+        log_debug "Processing key entry: '$keyfile' (Path: '$key_path')"
         if [ -f "$key_path" ]; then
             log_info "Attempting to add key: $key_path"
             if [[ "$PLATFORM" == "Darwin" ]]; then
@@ -429,102 +592,165 @@ add_keys_to_agent() {
             fi
             ssh_add_status=${PIPESTATUS[0]:-$?}
             log_debug "ssh-add command ('$cmd_to_run') status: $ssh_add_status"
-            if [ "$ssh_add_status" -ne 0 ]; then log_debug "ssh-add output: $ssh_add_output"; fi
+            if [ "$ssh_add_status" -ne 0 ]; then log_debug "ssh-add output/error: $ssh_add_output"; fi
 
             if [ "$ssh_add_status" -eq 0 ]; then
-                log_info "Successfully added $keyfile"
+                log_info "Successfully added '$keyfile'"
                 ((added_count++))
             else
-                printf "  ✗ Failed to add key '%s' (status: %d)\n" "$keyfile" "$ssh_add_status"
+                printf "  ✗ Failed to add key '%s' (status: %d)\\n" "$keyfile" "$ssh_add_status"
                 log_error "Failed to add key '$keyfile' (Path: $key_path, Status: $ssh_add_status)."
                 ((failed_count++))
             fi
         else
-            printf "  ✗ Key file '%s' not found at '%s'\n" "$keyfile" "$key_path"
+            printf "  ✗ Key file '%s' not found at '%s'\\n" "$keyfile" "$key_path"
             log_warn "Key file '$keyfile' listed but not found at '$key_path'."
             ((failed_count++))
         fi
     done < "$VALID_KEY_LIST_FILE"
-    printf "\nSummary: %d key(s) added, %d key(s) failed.\n" "$added_count" "$failed_count"
-    log_info "Finished adding keys. Added: $added_count, Failed: $failed_count"
+
+    printf "\\nSummary: %d key(s) added, %d key(s) failed/skipped.\\n" "$added_count" "$failed_count"
+    log_info "Finished adding keys. Added: $added_count, Failed/Skipped: $failed_count"
+
     [ "$added_count" -gt 0 ] && return 0 || return 1
 }
 
+# ------------------------------------------------------------------------------
 # --- Interactive Menu Helper Functions ---
+# ------------------------------------------------------------------------------
+
+# --- display_main_menu ---
+#
+# @description Clears the screen and displays the main interactive menu options.
+# @arg        None
+# @prints     The menu text to stdout.
+# @stdout     Formatted menu.
+# @stderr      None
+# @depends    Global variables: PLATFORM, SSH_DIR. Function: log_debug. External command: clear, printf.
+# ---
 display_main_menu() {
     log_debug "Displaying main menu..."
-    clear
-    printf "\n======= SSH Key Manager Menu =======\n"
-    printf " Platform: %s\n" "$PLATFORM"
-    printf " SSH Directory: %s\n" "$SSH_DIR"
-    printf "++++++++++++++++++++++++++++++++++++\n"
-    printf " Please choose an option:\n"
-    printf "   1) Set SSH Directory (Not Implemented)\n"
-    printf "   2) List Current Keys\n"
-    printf "   3) Reload All Keys\n"
-    printf "   4) Display Log File Location\n"
-    printf "   5) Delete Single Key\n"
-    printf "   6) Delete All Keys\n"
-    printf "   q) Quit\n"
-    printf "++++++++++++++++++++++++++++++++++++\n"
+    clear # Clear the terminal screen.
+    printf "\\n======= SSH Key Manager Menu =======\\n"
+    printf " Platform: %s\\n" "$PLATFORM"
+    printf " SSH Directory: %s\\n" "$SSH_DIR"
+    printf "+++++++++++++++++++++++++++++++++++\\n"
+    printf " Please choose an option:\\n"
+    printf "   1) Set SSH Directory (Not Implemented)\\n"
+    printf "   2) List Current Keys in Agent\\n"
+    printf "   3) Reload Keys (Find & Add All)\\n"
+    printf "   4) Display Log File Info\\n"
+    printf "   5) Delete Single Key from Agent\\n"
+    printf "   6) Delete All Keys from Agent\\n"
+    printf "   q) Quit\\n"
+    printf "+++++++++++++++++++++++++++++++++++\\n"
 }
 
+# --- get_menu_choice ---
+#
+# @description Prompts the user to enter a menu choice and validates the input.
+#              Loops until a valid choice (1-6 or q/Q) is entered.
+# @arg        None
+# @return     0 Always (after a valid choice is made).
+# @prints     The prompt to the user via stderr (so it doesn't interfere with stdout capture).
+#             Error messages to stdout for invalid choices.
+# @reads      User input from /dev/tty for selection.
+# @stdout     The valid user choice (1-6, q).
+# @stderr     The input prompt.
+# @depends    Function: log_debug, log_warn. External command: read, printf, echo.
+# ---
 get_menu_choice() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     local choice
     while true; do
         read -r -p "Enter choice [1-6, q]: " choice < /dev/tty
-        log_debug "User entered: '$choice'"
+        log_debug "User entered selection: '$choice'"
         case "$choice" in
             [1-6]|q|Q) echo "$choice"; return 0 ;;
-            *) printf "Invalid choice '%s'. Please try again.\n" "$choice"; log_warn "Invalid menu choice: '$choice'" ;;
+            *) printf "Invalid choice '%s'. Please try again.\\n" "$choice"; log_warn "Invalid menu choice: '$choice'" ;;
         esac
     done
 }
 
+# --- wait_for_key ---
+#
+# @description Pauses execution and waits for the user to press any key.
+#              Used after displaying information in the menu to allow the user
+#              to read before returning to the main menu display.
+# @arg        None
+# @prints     A prompt message to stdout.
+# @reads      A single character from /dev/tty without echoing it (-s) or needing Enter (-n).
+# @stdout     Prompt message.
+# @stderr      None
+# @depends    External command: printf, read.
+# ---
 wait_for_key() {
-    printf "\nPress any key to return to the main menu...\n"
+    printf "\\nPress any key to return to the main menu...\\n"
     read -n 1 -s -r < /dev/tty
 }
 
+# ------------------------------------------------------------------------------
 # --- Interactive Menu Core Logic Functions ---
+# ------------------------------------------------------------------------------
+# These functions implement the actions corresponding to the menu choices.
+
+# --- list_current_keys ---
+#
+# @description Attempts to list the keys currently loaded in the ssh-agent
+#              using `ssh-add -l`. Handles different exit codes from `ssh-add -l`.
+# @arg        None
+# @requires   An accessible ssh-agent (checked implicitly by ssh-add -l).
+# @return     0 If keys were listed successfully OR if no keys were found (status 1).
+# @return     1 If there was an error connecting to the agent (status 2) or another
+#               unexpected error occurred during listing.
+# @prints     The list of keys (if any) or messages indicating no keys or errors to stdout/stderr.
+# @stdout     Output from `list_current_keys` or "No agent" message.
+# @stderr     Output from `list_current_keys` or "No agent" message hint.
+# @depends    Function: log_debug, log_info, log_error. External command: ssh-add, printf.
+# ---
 list_current_keys() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    log_info "Listing current keys in agent..."
+    log_info "Listing current keys in agent (ssh-add -l)..."
+
+    # Perform an initial check to see if connection is possible / keys exist,
+    # without printing normal output yet. Silently check status.
     ssh-add -l >/dev/null 2>&1 || true
     local exit_code=${PIPESTATUS[0]:-$?}
     log_debug "Initial ssh-add -l status check: $exit_code"
+
+    # Handle different outcomes based on the exit code.
     case $exit_code in
         0) # Keys are present
-            printf "Keys currently loaded in the agent:\n"
+            printf "Keys currently loaded in the agent:\\n"
             log_info "Keys currently loaded in the agent:"
             local key_list
             key_list=$(ssh-add -l 2>&1 || true)
             local list_exit_code=${PIPESTATUS[0]:-$?}
             log_debug "Second ssh-add -l status: $list_exit_code"
             if [ -n "$key_list" ]; then
-                printf "%s\n" "$key_list"
-                log_info "List of keys reported by agent:\n$key_list"
+                printf "%s\\n" "$key_list"
+                log_info "List of keys reported by agent:"
+                echo "$key_list" | while IFS= read -r line; do log_info "  $line"; done
             fi
             if [ "$list_exit_code" -ne 0 ] && [ "$list_exit_code" -ne 1 ]; then
                 log_error "ssh-add -l failed unexpectedly (exit code $list_exit_code)."
-                printf "Error listing keys (Code: %s).\n" "$list_exit_code" >&2
+                printf "Error listing keys (Code: %s).\\n" "$list_exit_code" >&2
                 return 1
             fi
             ;;
         1) # No keys loaded
-            printf "No keys currently loaded in the agent.\n"
-            printf "Hint: Use option 3 to load keys from '%s'.\n" "$SSH_DIR"
+            printf "No keys currently loaded in the agent.\\n"
+            printf "Hint: Use option 3 to load keys from '%s'.\\n" "$SSH_DIR"
             log_info "No keys currently loaded."
             ;;
         2) # Cannot connect
             log_error "Could not connect to the SSH agent (ssh-add -l exit code 2)."
-            printf "Error: Could not connect to the SSH agent. Is it running?\n" >&2
+            printf "Error: Could not connect to the SSH agent. Is it running?\\n" >&2
             return 1
             ;;
         *) # Unknown error
-            log_error "Unknown error from ssh-add -l check (Exit code: $exit_code)."
-            printf "Error: An unexpected error occurred checking keys (Code: %s).\n" "$exit_code" >&2
+            log_error "Unknown error occurred from ssh-add -l check (Exit code: $exit_code)."
+            printf "Error: An unexpected error occurred checking keys (Code: %s).\\n" "$exit_code" >&2
             return 1
             ;;
     esac
@@ -532,42 +758,76 @@ list_current_keys() {
     return 0
 }
 
+# --- display_log_location ---
+#
+# @description Displays the location and size of the current log file,
+#              or indicates if logging is disabled.
+# @arg        None
+# @prints     Log file path and size (or disabled status) to stdout.
+# @stdout     Log file information.
+# @stderr      None
+# @depends    Global variable: LOG_FILE. Functions: log_debug, log_info, log_warn.
+#             External command: printf, ls, awk.
+# ---
 display_log_location() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    printf "\n+++ Log File Information +++\n"
+    printf "\\n+++ Log File Information +++\\n"
     if [ "$LOG_FILE" = "/dev/null" ]; then
-        printf "Logging is currently disabled.\n"
-        log_info "Logging is disabled."
+        printf "Logging is currently disabled.\\n"
+        log_info "User requested log location: Logging is disabled."
     else
-        printf "Current log file location: %s\n" "$LOG_FILE"
+        printf "Current log file location: %s\\n" "$LOG_FILE"
         local log_size_human="-"
         if [ -f "$LOG_FILE" ]; then
             log_size_human=$(ls -lh "$LOG_FILE" 2>/dev/null | awk '{print $5}')
         else
              log_warn "Log file $LOG_FILE not found when trying to get size."
+             log_size_human="(File not found)"
         fi
-        printf "Log file size: %s\n" "$log_size_human"
+        printf "Current log file size: %s\\n" "$log_size_human"
         log_info "Displaying log file location: $LOG_FILE (Size: $log_size_human)"
     fi
-    printf "++++++++++++++++++++++++++++++++++++\n"
+    printf "+++++++++++++++++++++++++++++++++++\\n"
     log_debug "Exiting function: ${FUNCNAME[0]} (Status: 0)"
     return 0
 }
 
+# --- delete_single_key ---
+#
+# @description Interactively prompts the user to select a key file (from a list
+#              of potential keys found in $SSH_DIR) and attempts to delete that
+#              specific key from the ssh-agent using `ssh-add -d <key_path>`.
+# @arg        None
+# @requires   An accessible ssh-agent containing keys. The temporary file $KEYS_LIST_TMP
+#             should be populated by `update_keys_list_file`.
+# @return     0 If the operation was cancelled by the user OR if the selected key
+#               was successfully deleted.
+# @return     1 If there's an error connecting to the agent, finding key files,
+#               reading the temporary list, or if the `ssh-add -d` command fails
+#               for the selected key.
+# @prints     A numbered list of potential key files, prompts for user input,
+#             and status messages about the deletion attempt to stdout/stderr.
+# @reads      User input from /dev/tty for selection.
+# @stdout     Menu, prompts, success/failure messages.
+# @stderr     Error messages (e.g., connection failure, deletion failure).
+# @depends    Global variables: SSH_DIR, KEYS_LIST_TMP. Functions: log_debug, log_info,
+#             log_error, log_warn, update_keys_list_file. External command: ssh-add, mapfile (bash 4+), read.
+# ---
 delete_single_key() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    printf "\n+++ Delete Single Key +++\n"
-    # Check agent status first
+    printf "\\n+++ Delete Single Key from Agent +++\\n"
+
+    # First, check if the agent is accessible and has keys.
     ssh-add -l >/dev/null 2>&1 || true
     local agent_check_status=${PIPESTATUS[0]:-$?}
     if [ "$agent_check_status" -eq 1 ]; then # No keys loaded
-        printf "No keys currently loaded in ssh-agent to delete.\n"
+        printf "No keys currently loaded in ssh-agent to delete.\\n"
         log_info "delete_single_key: No keys loaded, nothing to do."
-        return 0
+        return 0 # Nothing to delete, considered success for this operation.
     elif [ "$agent_check_status" -ne 0 ]; then # Error connecting (status 2 or other)
         log_error "delete_single_key: Cannot query agent (ssh-add -l status: $agent_check_status)."
         printf "Error: Could not query the SSH agent (status: %d).\n" "$agent_check_status" >&2
-        return 1
+        return 1 # Connection error.
     fi
     # Agent has keys, proceed
     log_info "Agent has keys. Listing potential key files..."
@@ -588,16 +848,16 @@ delete_single_key() {
         printf "Error reading key file list.\n" >&2
         return 1
     fi
-    printf "Select a key file to remove from the agent:\n"
+    printf "Select a key file to remove from the agent:\\n"
     local i choice selected_index selected_filename key_path del_status return_status=1
     for i in "${!key_files[@]}"; do
-        printf "  %2d) %s\n" "$((i + 1))" "${key_files[i]}"
+        printf "  %2d) %s\\n" "$((i + 1))" "${key_files[i]}"
     done
     while true; do
         read -r -p "Enter key number to delete (or 'c' to cancel): " choice < /dev/tty
         log_debug "User entered selection: '$choice'"
         case "$choice" in
-            c|C) printf "Operation cancelled.\n"; log_info "User cancelled deletion."; return_status=0; break ;;
+            c|C) printf "Operation cancelled.\\n"; log_info "User cancelled deletion."; return_status=0; break ;;
             *)
                 if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#key_files[@]}" ]; then
                     selected_index=$((choice - 1))
@@ -629,35 +889,72 @@ delete_single_key() {
     return $return_status
 }
 
+# --- delete_all_keys ---
+#
+# @description Deletes all keys currently loaded in the ssh-agent after prompting
+#              the user for confirmation.
+# @arg        None
+# @requires   An accessible ssh-agent.
+# @return     0 If the operation was cancelled by the user OR if all keys were
+#               successfully deleted (or if no keys were present initially).
+# @return     1 If there was an error connecting to the agent OR if the underlying
+#               `delete_keys_from_agent` function failed unexpectedly.
+# @prints     Status messages, confirmation prompt, and success/failure messages to stdout/stderr.
+# @reads      User input ('y'/'Y') from /dev/tty for confirmation.
+# @stdout     Messages about loaded keys, prompt, cancellation/success message.
+# @stderr     Error messages (e.g., connection failure).
+# @depends    Functions: log_debug, log_info, log_error, log_warn, delete_keys_from_agent.
+#             External command: printf, ssh-add, wc, read.
+# ---
 delete_all_keys() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    printf "\n+++ Delete All Keys +++\n"
-    # Check agent status first
-    ssh-add -l >/dev/null 2>&1 || true
-    local agent_check_status=${PIPESTATUS[0]:-$?}
-    local key_count=0
-    if [ "$agent_check_status" -eq 1 ]; then # No keys loaded
-        printf "No keys currently loaded in ssh-agent.\n"
+    printf "\\n+++ Delete All Keys from Agent +++\\n"
+
+    # Check agent status and count keys if possible.
+    local agent_check_status key_count=0 list_output="" has_keys=0
+
+    # Try listing keys to get a count and check status simultaneously.
+    list_output=$(ssh-add -l 2>&1)
+    agent_check_status=${PIPESTATUS[0]:-$?}
+
+    if [ "$agent_check_status" -eq 0 ]; then # Status 0: Keys are present.
+        key_count=$(echo "$list_output" | wc -l)
+        key_count=${key_count##* } # Trim whitespace from wc output.
+        log_debug "Agent check status 0, counted $key_count keys."
+        if [ "$key_count" -gt 0 ]; then
+             has_keys=1
+        else
+             # Should not happen if status was 0, but handle defensively.
+             log_warn "delete_all_keys: ssh-add -l status 0 but key count is 0."
+             has_keys=0
+        fi
+    elif [ "$agent_check_status" -eq 1 ]; then # Status 1: No keys loaded.
+        log_info "delete_all_keys: No keys loaded in agent (status 1)."
+        has_keys=0
+    elif [ "$agent_check_status" -eq 2 ]; then # Status 2: Cannot connect.
+        log_error "delete_all_keys: Cannot query agent (ssh-add -l status: 2)."
+        printf "Error: Could not query the SSH agent (status: %d).\n" "$agent_check_status" >&2
+        return 1 # Connection error.
+    else # Other errors.
+        log_error "delete_all_keys: Error querying agent (ssh-add -l status: $agent_check_status)."
+        printf "Error: Could not query the SSH agent (Status: %d).\n" "$agent_check_status" >&2
+        return 1 # Other agent error.
+    fi
+
+    # If no keys are loaded, inform the user and exit successfully.
+    if [ "$has_keys" -eq 0 ]; then
+        printf "No keys currently loaded in ssh-agent.\\n"
         log_info "delete_all_keys: No keys loaded, nothing to do."
         return 0
-    elif [ "$agent_check_status" -ne 0 ]; then # Error connecting (status 2 or other)
-        log_error "delete_all_keys: Cannot query agent (ssh-add -l status: $agent_check_status)."
-        printf "Error: Could not query the SSH agent (status: %d).\n" "$agent_check_status" >&2
-        return 1
-    else # Keys might be present, count them
-         key_count=$(ssh-add -l | wc -l) # Count lines from actual output
-         log_debug "Agent check status 0, counted $key_count keys."
-         if [ "$key_count" -eq 0 ]; then # Should not happen if status was 0, but check
-             printf "No keys currently loaded in ssh-agent.\n"
-             log_warn "delete_all_keys: ssh-add -l status 0 but key count is 0."
-             return 0
-         fi
     fi
-    # Agent has keys, proceed with confirmation
-    printf "This will delete all %d keys from ssh-agent.\n" "$key_count"
+
+    # Keys are present, proceed with confirmation
+    printf "This will delete all %d keys from ssh-agent.\\n" "$key_count"
     local confirm del_status return_status=1
     read -r -p "Are you sure you want to continue? (y/N): " confirm < /dev/tty
     log_debug "User confirmation: '$confirm'"
+
+    # Process confirmation.
     case "$confirm" in
         y|Y)
             log_info "User confirmed deletion of all keys."
@@ -669,20 +966,40 @@ delete_all_keys() {
             fi
             ;;
         *)
-            printf "Operation cancelled.\n"
+            printf "Operation cancelled.\\n"
             log_info "User cancelled deletion."
             return_status=0 # Cancelled successfully
             ;;
     esac
+
     log_debug "Exiting function: ${FUNCNAME[0]} (status: $return_status)"
     return $return_status
 }
 
-# --- Internal Helper for Listing ---
+# ------------------------------------------------------------------------------
+# --- Internal Helper Functions ---
+# ------------------------------------------------------------------------------
+
+# --- _perform_list_keys_check ---
+#
+# @description Internal helper to check for a running agent (current env or
+#              sourced from $AGENT_ENV_FILE) and then call `list_current_keys`
+#              if an agent is found. Used by both the CLI `-l` action and the
+#              menu option 2. Provides context-specific hints if no agent is found.
+# @arg        None
+# @return     Exit status of `list_current_keys` if an agent is found.
+# @return     1 If no usable agent is found.
+# @prints     Messages indicating agent status or "No agent found" hints to stdout/stderr.
+# @stdout     Output from `list_current_keys` or "No agent" message.
+# @stderr     Output from `list_current_keys` or "No agent" message hint.
+# @depends    Global variable: AGENT_ENV_FILE. Functions: check_ssh_agent,
+#             list_current_keys, log_debug, log_info. External command: basename.
+# ---
 _perform_list_keys_check() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    local agent_found_list_check=0
-    # Check current env first
+    local agent_found_list_check=0 # Flag to track if a usable agent was found.
+
+    # Check 1: Current env first
     log_debug "_perform_list_keys_check: Checking current env..."
     if check_ssh_agent; then
         agent_found_list_check=1
@@ -713,14 +1030,30 @@ _perform_list_keys_check() {
         # For CLI context (-l), add hint
         # Check if we are likely in the CLI context (check $ACTION?)
         # Or just always print hint? Let's always print for now.
-        printf "Hint: Ensure agent is running or start the menu with '%s --menu'\n" "$(basename "$0")"
+        printf "Hint: Ensure agent is running or start the menu with '%s --menu'\n" "$(basename "$0")" >&2
         return 1 # Indicate failure to list keys due to no agent
     fi
 }
 
+# ------------------------------------------------------------------------------
 # --- CLI Action Functions ---
+# ------------------------------------------------------------------------------
+# These functions implement the command-line argument actions (e.g., -l, -a).
+# They typically perform validation, ensure the agent is running (if needed),
+# call the appropriate core logic function, and then exit with its status.
+
+# --- run_list_keys ---
+#
+# @description Handler for the `-l` or `--list` CLI option.
+#              Validates the SSH directory and calls the internal helper
+#              `_perform_list_keys_check` to find an agent and list keys.
+#              Exits with the status code returned by the helper.
+# @arg        None
+# @exits      With status 0 or 1 based on the outcome of `_perform_list_keys_check`.
+# @depends    Functions: validate_ssh_dir, _perform_list_keys_check, log_info, log_debug.
+# ---
 run_list_keys() {
-    log_info "CLI Action: Listing keys..."
+    log_info "CLI Action: Listing keys (--list)..."
     log_debug "Entering function: ${FUNCNAME[0]}"
     log_debug "run_list_keys: Validating SSH dir..."
     if ! validate_ssh_dir; then exit 1; fi
@@ -730,15 +1063,37 @@ run_list_keys() {
     exit $? # Exit with the status returned by the helper function
 }
 
+# --- run_load_keys ---
+#
+# @description Handler for the `-a` or `--add` CLI option.
+#              Validates SSH dir, ensures agent is running, finds potential keys
+#              in $SSH_DIR using `update_keys_list_file`, copies the list to
+#              $VALID_KEY_LIST_FILE, deletes existing keys from agent, then adds
+#              the keys from the list using `add_keys_to_agent`.
+#              Exits with the status code of `add_keys_to_agent`.
+# @arg        None
+# @exits      With status 0 or 1 based on validation, agent setup, key finding,
+#             or the final outcome of `add_keys_to_agent`.
+# @depends    Global variables: KEYS_LIST_TMP, VALID_KEY_LIST_FILE. Functions:
+#             validate_ssh_dir, ensure_ssh_agent, update_keys_list_file,
+#             delete_keys_from_agent, add_keys_to_agent, log_info, log_debug, log_error.
+#             External command: cp.
+# ---
 run_load_keys() {
-    log_info "CLI Action: Loading keys (using find)..."
+    log_info "CLI Action: Loading keys found in $SSH_DIR (--add)..."
+    log_debug "Entering function: ${FUNCNAME[0]}"
+
+    # Initial checks.
     if ! validate_ssh_dir; then exit 1; fi
     if ! ensure_ssh_agent; then exit 1; fi
-    # Update the temporary file using find
+
+    # Find potential keys and populate the temporary list file.
+    log_debug "run_load_keys: Updating temporary key list file..."
     if ! update_keys_list_file; then
         log_error "run_load_keys: Failed to find keys using find."
         exit 1
     fi
+
     # Copy temp list to the persistent list file that add_keys_to_agent uses
     log_debug "Copying found keys from temp file $KEYS_LIST_TMP to $VALID_KEY_LIST_FILE"
     cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE" || { log_error "Failed to copy temp key list."; exit 1; }
@@ -749,23 +1104,60 @@ run_load_keys() {
     exit $? # Exit with the status of add_keys_to_agent
 }
 
+# --- run_delete_all_cli ---
+#
+# @description Handler for the `-D` or `--delete-all` CLI option.
+#              Validates SSH dir, ensures agent is running, and calls
+#              `delete_all_keys` which handles confirmation and deletion.
+#              Exits with the status code of `delete_all_keys`.
+# @arg        None
+# @exits      With status 0 or 1 based on validation, agent setup, or the outcome
+#             of `delete_all_keys` (including user cancellation).
+# @depends    Functions: validate_ssh_dir, ensure_ssh_agent, delete_all_keys,
+#             log_info, log_debug.
+# ---
 run_delete_all_cli() {
-    log_info "CLI Action: Deleting all keys..."
+    log_info "CLI Action: Deleting all keys (--delete-all)..."
+    log_debug "Entering function: ${FUNCNAME[0]}"
+
+    # Initial checks.
     if ! validate_ssh_dir; then exit 1; fi
-    if ! ensure_ssh_agent; then exit 1; fi
-    # delete_all_keys handles confirmation internally
+    if ! ensure_ssh_agent; then exit 1; fi # Agent required for deletion.
+
+    # Call the function that handles confirmation and deletion.
     delete_all_keys
-    exit $? # Exit with the status of delete_all_keys
+    local delete_status=$?
+    log_debug "Exiting function: ${FUNCNAME[0]} with status $delete_status"
+    exit $delete_status # Exit with the status of delete_all_keys.
 }
 
+# --- run_load_keys_from_file ---
+#
+# @description Handler for the `-f <file>` or `--file <file>` CLI option.
+#              Validates the source key list file, target list directory, SSH dir,
+#              ensures agent is running, prepares the $VALID_KEY_LIST_FILE by
+#              copying/filtering the source file (removing comments/blanks),
+#              then calls `add_keys_to_agent` to load the keys.
+#              Exits with the status code of `add_keys_to_agent`.
+# @arg        $1 String Path to the source file containing key basenames. Passed from main().
+# @exits      With status 0 or 1 based on validation, agent setup, file processing,
+#             or the final outcome of `add_keys_to_agent`.
+# @depends    Global variable: VALID_KEY_LIST_FILE. Functions: validate_ssh_dir,
+#             ensure_ssh_agent, add_keys_to_agent, log_info, log_debug, log_error, log_warn.
+#             External commands: dirname, mkdir, grep, chmod.
+# ---
 run_load_keys_from_file() {
     local source_key_file="$1" # Arg passed from main()
-    log_info "CLI Action: Loading keys from file: $source_key_file"
+    log_info "CLI Action: Loading keys from specified file (--file '$source_key_file')..."
+    log_debug "Entering function: ${FUNCNAME[0]} (Source File: $source_key_file)"
+
+    # Validate the source key list file.
     if [ ! -f "$source_key_file" ] || [ ! -r "$source_key_file" ]; then
         log_error "Source key list file not found or not readable: '$source_key_file'"
         exit 1
     fi
-    # Validate target dir for VALID_KEY_LIST_FILE
+
+    # Ensure the *directory* for the internal persistent key list file exists.
     local target_list_dir
     target_list_dir=$(dirname "$VALID_KEY_LIST_FILE")
     if ! mkdir -p "$target_list_dir"; then
@@ -784,28 +1176,50 @@ run_load_keys_from_file() {
     exit $? # Exit with the status of add_keys_to_agent
 }
 
+# ------------------------------------------------------------------------------
 # --- Help Function ---
+# ------------------------------------------------------------------------------
+
+# --- display_help ---
+#
+# @description Displays the help message (usage instructions) for the script.
+#              Uses a heredoc for easy formatting. Shows dynamically determined
+#              paths where possible.
+# @arg        None
+# @prints     The help text to stdout.
+# @stdout     Formatted help message.
+# @stderr      None
+# @depends    Global variables: SSH_DIR, LOG_DIR (potentially unset), LOG_FILENAME (potentially unset).
+#             External command: basename, cat.
+# ---
 display_help() {
-    # Use cat heredoc for easier formatting
-    # Log File location might not be accurate if setup_logging fails, but show default target.
+    # Use cat heredoc for easier formatting.
+    # Show default/determined paths. Use :-unavailable if variables might not be set yet
+    # (e.g., if called due to early argument parse error before setup_logging).
     cat << EOF
 SSH Key Manager - $(basename "$0")
 
-Manages SSH keys in ssh-agent.
+Manages SSH keys in the ssh-agent via command-line options or an interactive menu.
 
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  -l, --list          List keys currently loaded in the ssh-agent.
-  -a, --add           Add all keys found in the SSH directory ($SSH_DIR) to the agent
-                      (uses simple find logic, deletes existing keys first).
-                      NOTE: This may differ from keys loaded by other tools.
+  -l, --list          List keys currently loaded in the ssh-agent. Checks current
+                      environment and persisted agent file ($AGENT_ENV_FILE).
+  -a, --add           Finds potential private key files (no extension, not known_hosts, etc.)
+                      in the SSH directory ($SSH_DIR), deletes all existing keys
+                      from the agent, then adds the found keys. Passphrases may be
+                      prompted if keys are protected.
   -f <file>, --file <file>
-                      Add keys listed (one basename per line) in the specified <file>.
-                      '#' comments and blank lines ignored. Deletes existing keys first.
-  -D, --delete-all    Delete all keys currently loaded in the ssh-agent (prompts).
-  -m, --menu          Show the interactive menu interface.
-  -v, --verbose       Enable verbose (DEBUG level) logging to the log file.
+                      Deletes all existing keys from the agent, then adds keys whose
+                      basenames are listed (one per line) in the specified <file>.
+                      Lines starting with '#' and blank lines in <file> are ignored.
+                      Keys must reside in $SSH_DIR.
+  -D, --delete-all    Delete all keys currently loaded in the ssh-agent. Prompts for
+                      confirmation before proceeding.
+  -m, --menu          Show the interactive text-based menu interface for managing keys.
+  -v, --verbose       Enable verbose (DEBUG level) logging to the log file. Useful
+                      for troubleshooting.
   -h, --help          Display this help message and exit.
 
 Default Behavior:
@@ -813,18 +1227,45 @@ Default Behavior:
 
 Examples:
   $(basename "$0") --list          # List loaded keys
-  $(basename "$0") --add           # Reload keys based on simple find in $SSH_DIR
+  $(basename "$0") --add           # Reload keys based on 'find' in $SSH_DIR
   $(basename "$0") --file my_keys.txt # Load keys listed in my_keys.txt
   $(basename "$0") --delete-all    # Delete all loaded keys (prompts)
-  $(basename "$0")                 # Show this help message
   $(basename "$0") --menu          # Start the interactive menu
+  $(basename "$0")                 # Show this help message
 
-Log File Target: ${LOG_DIR:-unavailable}/${LOG_FILENAME:-unavailable} (Actual path depends on permissions/environment)
+Configuration Files & Paths:
+  SSH Directory:       $SSH_DIR
+  Agent Env File:    $AGENT_ENV_FILE
+  Internal Key List: $VALID_KEY_LIST_FILE (Used by -f, -a, menu reload)
+  Log File Target:   ${LOG_DIR:-<determined_at_runtime>}/${LOG_FILENAME:-sshkeymanager.log}
+                     (Actual path depends on permissions/environment variables like SKM_LOG_DIR)
 
 EOF
 }
 
+# ------------------------------------------------------------------------------
 # --- Main Interactive Menu Function ---
+# ------------------------------------------------------------------------------
+
+# --- run_interactive_menu ---
+#
+# @description Main loop for the interactive menu mode.
+#              Displays the menu, gets user choice, and calls the corresponding
+#              action function. Ensures the agent is running before performing
+#              actions that require it (reload, delete).
+# @arg        None
+# @exits      With status 0 when the user chooses 'q' (Quit).
+# @exits      With status 1 if initial SSH directory validation fails.
+# @prints     Menu, prompts, and output from action functions to stdout/stderr.
+# @reads      User input via `get_menu_choice`.
+# @stdout     Output from menu and action functions.
+# @stderr     Output from menu and action functions.
+# @depends    Functions: validate_ssh_dir, display_main_menu, get_menu_choice,
+#             _perform_list_keys_check, ensure_ssh_agent, update_keys_list_file,
+#             delete_keys_from_agent, add_keys_to_agent, display_log_location,
+#             delete_single_key, delete_all_keys, wait_for_key, log_debug, log_info,
+#             log_error, log_warn. External command: printf, cp, sleep.
+# ---
 run_interactive_menu() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     log_info "Starting SSH Key Manager in Interactive Mode..."
@@ -861,12 +1302,8 @@ run_interactive_menu() {
                     if ! update_keys_list_file; then
                         log_error "Failed to find keys to reload." # Error already printed by func
                     else
-                        log_debug "Copying found keys from temp file $KEYS_LIST_TMP to $VALID_KEY_LIST_FILE"
-                        cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE" || { log_error "Failed to copy temp key list."; }
-                        log_info "Deleting existing keys before adding..."
-                        delete_keys_from_agent # Ignore error?
                         log_info "Adding keys found by find..."
-                        add_keys_to_agent # Log error if failed?
+                        add_keys_to_agent
                     fi
                 fi
                 wait_for_key ;;
@@ -894,7 +1331,7 @@ run_interactive_menu() {
                 fi
                 wait_for_key ;;
             q|Q) # Quit
-                log_info "User selected Quit."
+                log_info "User selected Quit from menu."
                 printf "\nThank you for using SSH Key Manager. Goodbye!\n"
                 exit 0 ;;
             *) # Should not happen
@@ -907,46 +1344,119 @@ run_interactive_menu() {
     # Log statement here is unreachable because loop only exits via 'exit 0'
 }
 
-# --- Finalization Functions (for Traps) ---
+# ------------------------------------------------------------------------------
+# --- Finalization and Trap Functions ---
+# ------------------------------------------------------------------------------
+
+# --- log_execution_time ---
+#
+# @description Calculates and logs the total script execution time.
+#              Called by the EXIT trap handler (_script_exit_handler).
+# @arg        None
+# @appends    Execution time message to the log file if logging is enabled
+#             and start/end times are valid.
+# @stdout      None
+# @stderr      None
+# @depends     Global variables: LOG_FILE, _script_start_time. Functions: log_info,
+#             log_warn. External command: date.
+# ---
 log_execution_time() {
     local end_time script_duration
-    # Use -v to safely check if LOG_FILE is set, even with set -u
-    if [ -v LOG_FILE ] && [ -n "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
-        if [[ -n "$_script_start_time" ]]; then
-            end_time=$(date +%s.%N)
-            if command -v bc > /dev/null; then
-                script_duration=$(echo "$end_time - $_script_start_time" | bc -l)
-                printf -v script_duration "%.3f" "$script_duration"
-            else
-                local start_seconds end_seconds
-                start_seconds=$(echo "$_script_start_time" | cut -d. -f1)
-                end_seconds=$(echo "$end_time" | cut -d. -f1)
-                script_duration=$((end_seconds - start_seconds))
-                log_warn "'bc' command not found, reporting execution time in integer seconds."
-            fi
-            log_info "Total script execution time: ${script_duration} seconds."
+    # Check if LOG_FILE is set to something other than /dev/null and _script_start_time is set
+    if [ "$LOG_FILE" != "/dev/null" ] && [[ -n "$_script_start_time" ]]; then
+        end_time=$(date +%s) # Get end time in seconds since epoch.
+
+        # Validate that start and end times look like integers before calculating.
+        if [[ "$end_time" =~ ^[0-9]+$ ]] && [[ "$_script_start_time" =~ ^[0-9]+$ ]]; then
+             script_duration=$((end_time - _script_start_time))
+             log_info "Total script execution time: ${script_duration} seconds."
+        else
+             log_warn "Could not calculate execution time: Invalid start or end time (Start: '${_script_start_time}', End: '${end_time}')"
         fi
     fi
 }
 
+# --- _cleanup_temp_file ---
+#
+# @description Removes the temporary file created by `mktemp` for key listing.
+#              Called by the EXIT/ERR trap handler (_script_exit_handler).
+#              Checks if the temporary file variable is set and if the file exists.
+# @arg        None
+# @modifies   Deletes the file pointed to by $KEYS_LIST_TMP.
+# @stdout      None
+# @stderr      None
+# @depends     Global variable: KEYS_LIST_TMP, IS_VERBOSE. Function: log_debug.
+#             External command: rm.
+# ---
 _cleanup_temp_file() {
     if [ -n "${KEYS_LIST_TMP:-}" ] && [ -f "$KEYS_LIST_TMP" ]; then
-        # Logging might not be available on early exit or if setup failed
+        # Log removal only if verbose, as this happens on every exit.
+        # Use command -v check as log_debug might not be defined on very early errors.
         if command -v log_debug >/dev/null && [ "$IS_VERBOSE" = "true" ]; then
-             log_debug "Cleanup trap: Removing temporary file $KEYS_LIST_TMP";
+             log_debug "Cleanup trap: Removing temporary file '$KEYS_LIST_TMP'";
         fi
         rm -f "$KEYS_LIST_TMP"
     fi
 }
 
-# --- main() Function ---
+# --- _script_exit_handler ---
+#
+# @description Combined trap handler function called on script EXIT (normal or via exit command)
+#              and ERR (due to `set -e` or explicit error).
+#              Ensures both cleanup and final logging actions are performed.
+# @arg        None - implicitly receives script's exit status in $?.
+# @calls      _cleanup_temp_file
+# @calls      log_execution_time
+# @stdout      None
+# @stderr      None
+# @depends     Functions: _cleanup_temp_file, log_execution_time, log_debug.
+# ---
+_script_exit_handler() {
+    local exit_status=$? # Capture the script's exit status *immediately*.
+    log_debug "_script_exit_handler triggered (Script Exit Status: $exit_status)"
+
+    # Perform cleanup actions.
+    _cleanup_temp_file      # Always clean up temp file
+
+    # Perform final logging actions.
+    # log_execution_time checks internally if logging is enabled.
+    log_execution_time
+
+    # No need to explicitly exit here; the trap handler finishes and script exit proceeds.
+    log_debug "_script_exit_handler finished."
+}
+
+# ==============================================================================
+# --- Main Script Logic ---
+# ==============================================================================
+
+# --- main ---
+#
+# @description Main execution function of the script.
+#              Parses command-line arguments, performs runtime initialization
+#              (logging, temp file), and dispatches control to the appropriate
+#              action function based on parsed arguments or defaults to help.
+# @arg        $@ All command-line arguments passed to the script.
+# @exits      Delegates exit status determination to the called action functions
+#             (run_*, display_help, run_interactive_menu). Exits with 1 on
+#             initialization errors (e.g., mktemp failure) or argument parsing errors.
+# @stdout      Output from dispatched action functions or help message.
+# @stderr      Output from dispatched action functions or error messages.
+# @depends     All other functions indirectly. Global variables: ACTION, IS_VERBOSE,
+#             source_key_file, PLATFORM, STAT_CMD, LOG_FILE, LOG_DIR, LOG_FILENAME,
+#             SSH_DIR, VALID_KEY_LIST_FILE, AGENT_ENV_FILE, KEYS_LIST_TMP, _script_start_time.
+#             Functions: setup_logging, log_debug, log_info, log_error, display_help,
+#             run_list_keys, run_load_keys, run_load_keys_from_file, run_delete_all_cli,
+#             run_interactive_menu. External commands: mktemp, printf.
+# ---
 main() {
     # --- Argument Parsing ---
-    # Updates global ACTION, IS_VERBOSE, source_key_file
-    # Sets local parse_error flag
-    local parse_error=0
-    local FIRST_ACTION_SET=0
-    local args_copy=("$@")
+    # Loop through arguments, update global ACTION, IS_VERBOSE, source_key_file.
+    # Sets local parse_error=1 if invalid options/arguments are found.
+    # Allows only the *first* action flag encountered to set the ACTION.
+    local parse_error=0          # Flag for parsing errors.
+    local FIRST_ACTION_SET=0     # Flag to ensure only one action is processed.
+    local args_copy=("$@")       # Copy arguments to avoid issues with modifying $@.
     local i=0
     while [ $i -lt ${#args_copy[@]} ]; do
         local arg="${args_copy[$i]}"
@@ -958,16 +1468,21 @@ main() {
                 if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="add"; FIRST_ACTION_SET=1; fi
                 i=$((i + 1)) ;;
             -f|--file)
+                 # Expects a filename as the next argument.
                  local next_arg_index=$((i + 1))
-                 local next_arg="${args_copy[$next_arg_index]:-}"
+                 local next_arg="${args_copy[$next_arg_index]:-}" # Get next arg or empty string if none.
+                 # Check if next argument exists and doesn't look like another option.
                  if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
                      printf "Error: Option '%s' requires a filename argument.\\n\\n" "$arg" >&2
-                     ACTION="help"; parse_error=1; break
+                     ACTION="help"; parse_error=1; break # Force help display and mark error.
                  fi
+                 # Set action only if it's the first one.
                  if [ "$FIRST_ACTION_SET" -eq 0 ]; then
                      ACTION="file"; source_key_file="$next_arg"; FIRST_ACTION_SET=1
+                 else
+                      printf "Warning: Ignoring subsequent action flag '%s' after action '%s' was already set.\\n" "$arg" "$ACTION" >&2
                  fi
-                 i=$((i + 2)) ;;
+                 i=$((i + 2)) ;; # Consume both -f and filename.
             -D|--delete-all)
                 if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="delete-all"; FIRST_ACTION_SET=1; fi
                 i=$((i + 1)) ;;
@@ -975,70 +1490,97 @@ main() {
                 if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="menu"; FIRST_ACTION_SET=1; fi
                 i=$((i + 1)) ;;
             -v|--verbose)
-                IS_VERBOSE="true" # Set global flag
+                IS_VERBOSE="true" # Set global flag for verbose logging.
                 i=$((i + 1)) ;;
             -h|--help)
-                if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="help"; FIRST_ACTION_SET=1; fi
+                # Help action can override previous actions if encountered.
+                ACTION="help"; FIRST_ACTION_SET=1; parse_error=0 # Explicit help is not an error.
                 i=$((i + 1)) ;;
-            *)
+            *) # Unknown option.
                 printf "Error: Unknown option '%s'\\n\\n" "$arg" >&2
-                ACTION="help"; parse_error=1; break
+                ACTION="help"; parse_error=1; break # Force help display and mark error.
                 ;;
         esac
     done
 
     # --- Runtime Initialization ---
+
+    # Setup logging. This must happen after IS_VERBOSE might be set by args.
     if ! setup_logging; then
-        printf "Warning: Logging setup failed during initialization. Continuing with limited logging.\\n" >&2
-        # LOG_FILE remains /dev/null (default)
+        # setup_logging already prints warnings.
+        printf "Warning: Logging setup failed. Continuing with logging disabled.\\n" >&2
+        # LOG_FILE remains /dev/null (default), logging functions will be no-ops.
     fi
 
-    # Log details now that logging *might* be set up
-    log_debug "Script started at: $_script_start_time"
-    log_debug "Argument parsing complete. ACTION='$ACTION', IS_VERBOSE='$IS_VERBOSE', source_key_file='$source_key_file', ParseError='$parse_error'"
-    log_debug "Using Platform: $PLATFORM"
-    log_debug "Using STAT_CMD: $STAT_CMD"
-    log_debug "Using LOG_FILE: $LOG_FILE (from LOG_DIR: $LOG_DIR, FILENAME: $LOG_FILENAME)"
-    log_debug "Using SSH_DIR: $SSH_DIR"
-    log_debug "Using VALID_KEY_LIST_FILE: $VALID_KEY_LIST_FILE"
-    log_debug "Using AGENT_ENV_FILE: $AGENT_ENV_FILE"
+    # Log initial state and configuration (only works if setup_logging succeeded).
+    log_debug "--- Script Start ---"
+    log_debug "Timestamp: $_script_start_time"
+    log_debug "Arguments: $*"
+    log_debug "Parsed Action: '$ACTION'"
+    log_debug "Verbose Logging: '$IS_VERBOSE'"
+    log_debug "Source Key File: '${source_key_file:-N/A}'"
+    log_debug "Argument Parse Error: '$parse_error'"
+    log_debug "Platform: $PLATFORM"
+    log_debug "Stat Command: $STAT_CMD"
+    log_debug "SSH Directory: $SSH_DIR"
+    log_debug "Agent Env File: $AGENT_ENV_FILE"
+    log_debug "Valid Key List File: $VALID_KEY_LIST_FILE"
+    log_debug "Log Directory: $LOG_DIR"
+    log_debug "Log Filename: $LOG_FILENAME"
+    log_debug "Log File Path: $LOG_FILE"
 
-    # Create Temporary File *after* logging might be set up
-    # Assign to global KEYS_LIST_TMP declared earlier
+    # Create Temporary File for `find` results. Needs to be done *after* logging setup
+    # so potential errors can be logged. Assign path to global KEYS_LIST_TMP.
     if ! KEYS_LIST_TMP=$(mktemp "${TMPDIR:-/tmp}/ssh_keys_list.XXXXXX"); then
-        log_error "Failed to create temporary file. Please check permissions."
-        exit 1 # Exit script if temp file fails
+        log_error "Fatal: Failed to create temporary file using mktemp. Check permissions in '${TMPDIR:-/tmp}'."
+        printf "Error: Could not create required temporary file. Exiting.\\n" >&2
+        exit 1 # Critical failure, cannot proceed.
     fi
     log_debug "Temporary file created: $KEYS_LIST_TMP"
+    # Temp file will be removed by the EXIT trap handler.
 
     # --- Dispatch Action ---
+    # Execute the function corresponding to the determined ACTION.
     log_info "Selected action: $ACTION"
     case $ACTION in
-        list)       run_list_keys ;; # Exits script
-        add)        run_load_keys ;; # Exits script
-        file)       run_load_keys_from_file "$source_key_file" ;; # Exits script
-        delete-all) run_delete_all_cli ;; # Exits script
-        menu)       run_interactive_menu ;; # Exits script on quit
-        help|*)
-            display_help # Display help function defined globally
+        list)       run_list_keys ;;               # Exits script internally.
+        add)        run_load_keys ;;               # Exits script internally.
+        file)       run_load_keys_from_file "$source_key_file" ;; # Exits script internally.
+        delete-all) run_delete_all_cli ;;          # Exits script internally.
+        menu)       run_interactive_menu ;;        # Exits script internally (on quit).
+        help|*)     # Default action or explicit help.
+            display_help # Display the help message.
             if [ "$parse_error" -eq 1 ]; then
-                exit 1 # Exit with error if help was due to parsing error
+                exit 1 # Exit with error status if help was shown due to a parsing error.
             else
-                exit 0 # Exit successfully if help was default or explicit -h/--help
+                exit 0 # Exit successfully if help was default or explicit -h/--help.
             fi
             ;;
     esac
 
-    # Should not be reached if dispatch logic and called functions are correct
-    log_error "Script main function reached end unexpectedly after dispatching action: $ACTION."
-    exit 1 # Exit with error for unexpected fallthrough
+    # This point should ideally not be reached if dispatch logic and called functions are correct
+    # (as they should exit the script). If reached, it indicates an unexpected control flow error.
+    log_error "Critical Error: Script main function reached end unexpectedly after dispatching action: $ACTION."
+    printf "Error: Unexpected script termination. Please check logs: %s\\n" "${LOG_FILE:-N/A}" >&2
+    exit 1 # Exit with error for unexpected fallthrough.
 }
 
+# ==============================================================================
 # --- Trap Definitions ---
-# Defined AFTER the functions they call
-trap 'log_execution_time' EXIT
-trap '_cleanup_temp_file' EXIT ERR # Clean up temp file on normal exit or error
+# ==============================================================================
+# Traps must be defined *after* the functions they call.
 
+# Register the single combined handler function to run on:
+# - EXIT: Normal script termination (end of script or explicit `exit` command).
+# - ERR: Script termination due to an error when `set -e` is active.
+trap '_script_exit_handler' EXIT ERR
+log_debug "EXIT and ERR traps set to call _script_exit_handler."
+
+# ==============================================================================
 # --- Main Execution ---
-# Call main, passing all script arguments
+# ==============================================================================
+# Call the main function, passing all script arguments ($@).
+# The main function handles argument parsing and action dispatching.
+# Script execution begins here.
 main "$@"
+# Script exits within main() or its dispatched functions, or via traps.
