@@ -252,6 +252,20 @@ setup_logging() {
     return 0 # Indicate success.
 } # END setup_logging
 
+# --- _log_marker ---
+# Internal helper to write markers, ensuring they are written even if logging is disabled initially
+_log_marker() {
+    local marker_text="$1"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    # Use printf to stderr if LOG_FILE is /dev/null during early stages
+    if [[ "$LOG_FILE" == "/dev/null" ]]; then # Use double brackets
+        printf "%s - %s - MARKER: %s\n" "$timestamp" "$$" "$marker_text" >&2
+    else
+        echo "$timestamp - $$ - MARKER: $marker_text" >> "$LOG_FILE"
+    fi
+}
+
 log() {
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
@@ -1876,8 +1890,12 @@ _script_exit_handler() {
     # log_execution_time checks internally if logging is enabled.
     log_execution_time
 
+    # Log script end marker
+    _log_marker "_______<=:END:=> SSH Key Manager Script______"
+
     # No need to explicitly exit here; the trap handler finishes and script exit proceeds.
     log_debug "_script_exit_handler finished."
+    _log_marker "_______<=:EXIT:=> SSH Key Manager Script______"
 }
 
 # ==============================================================================
@@ -1908,11 +1926,8 @@ main() {
     if ! setup_logging; then
         printf "Warning: Logging setup failed. Continuing with logging disabled.\n" >&2
     fi
-
-    # --- Argument Parsing --- Initial values
-    local parse_error=0
-    local FIRST_ACTION_SET=0 # Needed for the simple parser fallback
-    # ACTION, IS_VERBOSE, source_key_file are global and have defaults
+    # Log script start marker *after* setup_logging attempt
+    _log_marker "_______<=:START:=> SSH Key Manager Script______"
 
     # --- Check for GNU getopt and Select Parsing Strategy --- 
     if _check_gnu_getopt; then 
@@ -2018,7 +2033,7 @@ main() {
     log_debug "Parsed Action: '$ACTION'"
     log_debug "Verbose Logging: '$IS_VERBOSE'"
     log_debug "Source Key File: '${source_key_file:-N/A}'"
-    log_debug "Argument Parse Error: '$parse_error'"
+    log_debug "Argument Parse Error: ${parse_error:-UNKNOWN}" # Use parameter expansion default
     log_debug "Platform: $PLATFORM"
     log_debug "Stat Command: $STAT_CMD"
     log_debug "SSH Directory: $SSH_DIR"
