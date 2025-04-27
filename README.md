@@ -4,279 +4,119 @@ A comprehensive SSH key management tool that provides a menu-driven interface fo
 
 ## Features
 
-- **Menu-Driven Interface**: Easy-to-use command-line interface for managing SSH keys
-- **Cross-Platform Support**: Works on both macOS and Linux systems
+- **Menu-Driven Interface**: Easy-to-use command-line interface for managing SSH keys.
+- **Cross-Platform Support**: Works on both macOS and Linux systems.
 - **Automatic SSH Agent Management**:
-  - Automatically starts ssh-agent if not running
-  - Manages agent environment variables
-  - Handles key loading and unloading
+  - Automatically starts ssh-agent if not running.
+  - Manages agent environment variables via a persistent file (`~/.config/agent.env` by default).
+  - Handles key loading and unloading.
 - **Key Management**:
-  - Load keys from SSH directory
-  - List currently loaded keys
-  - Delete individual keys
-  - Delete all keys at once
+  - Load keys based on finding files with matching `.pub` counterparts in the SSH directory.
+  - Load specific key(s) interactively from the list of found keys.
+  - List currently loaded keys (numbered list).
+  - Delete individual keys from the agent interactively.
+  - Delete all keys at once.
 - **Directory Management**:
-  - Validate SSH directory permissions
-  - Support for custom SSH directories
-  - Automatic directory creation with correct permissions
+  - Interactively set the SSH directory to use during a menu session.
+  - Validate SSH directory permissions.
+  - Support for custom SSH directories via environment variable (`SKM_SSH_DIR`).
+  - Automatic creation of the default SSH directory (`~/.ssh`) if it doesn't exist.
 - **Comprehensive Logging**:
-  - Platform-specific log locations
-  - Log rotation (1MB max size, 5 files)
-  - Detailed operation logging
-  - Error and warning tracking
+  - Platform-specific log locations.
+  - Log rotation (1MB max size, 5 files).
+  - Detailed operation logging.
+  - Error and warning tracking.
 
 ## Requirements
 
-- Bash shell (version 4.0 or higher)
-- SSH tools installed (ssh-add, ssh-agent)
-- Write permissions to log directory
-- Read/Write permissions to SSH directory
+- Bash shell (version 4.0 or higher recommended for `mapfile`).
+- Standard Unix utilities (`find`, `basename`, `wc`, `mkdir`, `touch`, `chmod`, `grep`, `date`, `ps`, `rm`, `mv`, `seq`, `sleep`, `dirname`).
+- SSH tools installed (`ssh-add`, `ssh-agent`).
+- Write permissions to log directory.
+- Read/Execute permissions to the target SSH directory.
 
 ## Installation
 
-Download the script:
+1. Download the script:
 
    ```bash
-   curl -O https://raw.githubusercontent.com/ggthedev/ssh-key-manager/main/load_ssh_keys.sh
+   curl -o sshkeymanager.sh https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/sshkeymanager.sh # Replace with the actual raw URL
+   # OR clone the repository
+   # git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+   # cd YOUR_REPO
    ```
 
-Make the script executable:
+2. Make the script executable:
 
-```bash
-chmod +x load_ssh_keys.sh
-```
+   ```bash
+   chmod +x sshkeymanager.sh
+   ```
 
-(Optional) Move to a directory in your PATH:
+3. (Optional) Move to a directory in your PATH for global access:
 
-```bash
-sudo mv load_ssh_keys.sh /usr/local/bin/sshkeymanager
-```
+   ```bash
+   sudo mv sshkeymanager.sh /usr/local/bin/sshkeymanager
+   ```
 
 ## Usage
 
-### Basic Usage
+### Command-Line Options
 
-Run the script:
+```
+sshkeymanager [OPTIONS]
 
-```bash
-./load_ssh_keys.sh
+Options:
+  -l, --list          List keys currently loaded in the ssh-agent.
+  -a, --add           Finds potential private key files (with matching .pub)
+                      in the SSH directory, deletes all existing keys
+                      from the agent, then adds the found keys.
+  -f <file>, --file <file>
+                      Deletes all existing keys from the agent, then adds keys whose
+                      basenames are listed in the specified <file>.
+  -D, --delete-all    Delete all keys currently loaded in the ssh-agent.
+  -m, --menu          Show the interactive text-based menu interface.
+  -v, --verbose       Enable verbose (DEBUG level) logging.
+  -h, --help          Display help message and exit.
 ```
 
-### Menu Options
+### Interactive Menu Mode (`sshkeymanager -m`)
 
 The script provides the following menu options:
 
-1. **Set SSH Directory**: Configure the directory where SSH keys are stored
-   - Default: `~/.ssh`
-   - Custom paths supported
-   - Validates permissions automatically
+1.  **Set SSH Directory**: Interactively change the directory to scan for keys during the current menu session.
+2.  **List Current Loaded Keys**: Display a numbered list of keys currently loaded in ssh-agent (shows fingerprints).
+3.  **Load Key(s)**: Presents a numbered list of potential private keys (found via `.pub` check) and allows selecting one or more keys to add to the agent.
+4.  **Delete Single Key from Agent**: Presents a numbered list of potential private keys and allows selecting one to remove from the agent (`ssh-add -d`).
+5.  **Delete All Keys from Agent**: Remove all keys currently loaded in ssh-agent (`ssh-add -D`), after confirmation.
+6.  **Display Log File Info**: Show the location and size of the current log file.
+7.  **Reload Keys**: Deletes all keys from the agent (`ssh-add -D`) and then loads all potential private keys found (via `.pub` check) in the current SSH directory.
+8.  **Quit**: Exit the program.
 
-2. **List Current Keys**: Display all keys currently loaded in ssh-agent
-   - Shows key fingerprints
-   - Displays key types and comments
-   - Handles empty key lists gracefully
-
-3. **Reload All Keys**: Clear and reload all keys from the SSH directory
-   - Removes existing keys
-   - Loads all valid keys from directory
-   - Provides loading status
-
-4. **Display Log File Location**: Show where log files are stored
-   - Platform-specific locations
-   - Current log file size
-   - Log rotation status
-
-5. **Delete Single Key**: Remove a specific key from ssh-agent
-   - Interactive key selection
-   - Confirmation prompt
-   - Success/failure feedback
-
-6. **Delete All Keys**: Remove all keys from ssh-agent
-   - Confirmation required
-   - Bulk removal
-   - Status reporting
-
-7. **Quit**: Exit the program
-   - Graceful exit
-   - Cleanup of temporary files
-   - Log final status
-
-### Example Workflows
-
-#### 1. Initial Setup
-
-```bash
-# Start the script
-./load_ssh_keys.sh
-
-# Set custom SSH directory (Option 1)
-Enter choice [1-6, q]: 1
-Current SSH directory: /Users/user/.ssh
-Select SSH directory:
-  1) Use standard location (/Users/user/.ssh)
-  2) Enter custom directory path
-  c) Cancel
-Enter choice [1-2, c]: 2
-Enter full path to directory: /path/to/ssh/keys
-Working directory set to: /path/to/ssh/keys
-
-# Load keys (Option 3)
-Enter choice [1-6, q]: 3
-Reloading all keys...
-Found 3 SSH key(s) in /path/to/ssh/keys
-Adding SSH keys to agent...
-Adding key: id_rsa
-  ✓ Successfully added
-Adding key: github_key
-  ✓ Successfully added
-Adding key: bitbucket_key
-  ✗ Failed to add (status: 1)
-
-Summary: 2 key(s) added, 1 key(s) failed
-```
-
-#### 2. Key Management
-
-```bash
-# List current keys (Option 2)
-Enter choice [1-6, q]: 2
-+++ Currently Loaded SSH Keys +++
-  1) 2048 SHA256:abc123... user@host (RSA)
-  2) 4096 SHA256:def456... user@host (RSA)
-
-# Delete a specific key (Option 5)
-Enter choice [1-6, q]: 5
-+++ Delete Single Key +++
-Select a key to delete:
-  1) 2048 SHA256:abc123... user@host (RSA)
-  2) 4096 SHA256:def456... user@host (RSA)
-Enter key number to delete (or 'c' to cancel): 1
-Deleting key: 2048 SHA256:abc123... user@host (RSA)
-Key successfully deleted.
-```
-
-#### 3. Troubleshooting
-
-```bash
-# Check log location (Option 4)
-Enter choice [1-6, q]: 4
-----------------------
-|Log File Information|
-----------------------
-Location: /Users/user/Library/Logs/sshkeymanager/sshkeymanager.log
-Current Size: 45K
-
-# View log contents
-tail -f /Users/user/Library/Logs/sshkeymanager/sshkeymanager.log
-```
-
-## Logging
-
-The script maintains detailed logs of all operations:
-
-- **macOS**: `~/Library/Logs/sshkeymanager/sshkeymanager.log`
-- **Linux**: `/var/log/sshkeymanager/sshkeymanager.log` or `~/.local/log/sshkeymanager/sshkeymanager.log`
-
-Log files are rotated when they reach 1MB in size, keeping up to 5 backup files.
-
-### Log Format
-
-```
-2024-03-14 10:30:45 - 12345 - INFO: Script starting
-2024-03-14 10:30:45 - 12345 - INFO: Platform: Darwin
-2024-03-14 10:30:45 - 12345 - INFO: User: user
-2024-03-14 10:30:45 - 12345 - INFO: Host: hostname
-```
-
-## Error Handling
-
-The script includes comprehensive error handling:
-
-- Directory permission validation
-- SSH agent status checking
-- Key loading verification
-- Operation confirmation for destructive actions
-- Graceful handling of missing dependencies
-
-### Common Error Messages
-
-1. **SSH Agent Not Running**:
-
-```
-SSH agent is not running or not accessible.
-Would you like to:
-  1) Start SSH agent and load keys
-  2) Return to main menu
-```
-
-2. **Permission Issues**:
-
-```
-Error: SSH directory '/path/to/ssh' is not writable
-```
-
-3. **Key Loading Failures**:
-
-```
-Failed to add key: id_rsa (status: 1)
-```
-
-## Limitations
-
-1. **Platform Support**:
-   - Primarily tested on macOS and Linux
-   - Limited support for other Unix-like systems
-   - No Windows support
-
-2. **Key Types**:
-   - Best support for RSA and ED25519 keys
-   - Limited support for other key types
-
-3. **Security**:
-   - Requires proper permissions for SSH directory
-   - Depends on system's SSH implementation
-   - No built-in encryption for stored keys
-
-4. **Performance**:
-   - May be slow with large numbers of keys
-   - Log rotation can be resource-intensive
-
-## Troubleshooting
-
-### Configuration via Environment Variables
+## Configuration via Environment Variables
 
 Certain paths used by the script can be overridden by setting environment variables before running the script:
 
 - `SKM_SSH_DIR`: Overrides the default SSH directory (`~/.ssh`).
-- `SKM_LOG_DIR`: Overrides the default log directory (platform-specific).
-- `SKM_LOG_FILENAME`: Overrides the default log filename (`sshkeygen.log`).
-- `SKM_AGENT_ENV_FILE`: Overrides the default agent environment file path (`~/.ssh/agent.env`).
-- `SKM_VALID_KEYS_FILE`: Overrides the default path for the cached list of valid key basenames (`~/.config/sshkeymanager/ssh_keys_list`).
+- `SKM_LOG_DIR`: Overrides the auto-detected log directory.
+- `SKM_LOG_FILENAME`: Overrides the default log filename (`sshkeymanager.log`).
+- `SKM_VALID_KEYS_FILE`: Overrides the path to the internal list used by `-f` / Reload (`~/.config/sshkeymanager/ssh_keys_list`).
+- `SKM_AGENT_ENV_FILE`: Overrides the path for the persistent agent environment file (`~/.config/agent.env`).
 
-Common issues and solutions:
+## Logging
 
-1. **SSH Agent Not Starting**:
-   - Check if SSH tools are installed
-   - Verify system permissions
-   - Check for existing agent processes
+The script maintains detailed logs of all operations.
 
-2. **Keys Not Loading**:
-   - Verify key file permissions (should be 600)
-   - Check SSH directory permissions (should be 700)
-   - Ensure keys are in correct format
+- **Default macOS**: `~/Library/Logs/sshkeymanager/sshkeymanager.log`
+- **Default Linux**: `/var/log/sshkeymanager/sshkeymanager.log` (if writable) or `~/.local/log/sshkeymanager/sshkeymanager.log`
+- **Fallback**: `~/.ssh/logs/sshkeymanager.log`
 
-3. **Logging Issues**:
-   - Check directory permissions
-   - Verify disk space
-   - Ensure write access to log location
+Log files are rotated when they reach 1MB in size, keeping up to 5 backup files.
 
-### Debug Mode
+## Troubleshooting
 
-To enable debug output, set the `IS_VERBOSE` variable to "true" in the script:
-
-```bash
-declare IS_VERBOSE="true"
-```
+- Ensure you have the necessary permissions for your SSH directory and the log directory.
+- Use the `-v` (verbose) flag to enable debug logging for more detailed information.
+- Check the log file specified by option `6` in the menu.
 
 ## Contributing
 
