@@ -81,9 +81,63 @@ declare KEYS_LIST_TMP="" # Path to the temporary file used for listing keys foun
 declare ACTION="help"       # Default action if no arguments are provided.
 declare source_key_file="" # Stores the filename provided with the -f/--file option.
 
+# Command path for GNU getopt (set by _check_gnu_getopt)
+declare GNU_GETOPT_CMD=""
+
 # ==============================================================================
 # --- Function Definitions ---
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# --- Dependency Check Functions ---
+# ------------------------------------------------------------------------------
+
+# --- _check_gnu_getopt ---
+#
+# @description Checks for a compatible (GNU) getopt command.
+#              Sets the global GNU_GETOPT_CMD variable if found.
+# @arg        None
+# @set        GNU_GETOPT_CMD Global variable with the path to GNU getopt.
+# @return     0 If GNU getopt is found.
+# @return     1 If GNU getopt is not found.
+# @prints     Error message to stderr if not found.
+# @stdout     None
+# @stderr     Error message.
+# @depends    External command: getopt.
+# ---
+_check_gnu_getopt() {
+    # Try standard getopt first, test for GNU compatibility
+    if getopt --test > /dev/null 2>&1; then
+        # Test command exits with 4 for GNU getopt
+        if [ $? -eq 4 ]; then
+            log_debug "Found compatible GNU getopt at: $(command -v getopt)"
+            GNU_GETOPT_CMD=$(command -v getopt)
+            return 0
+        fi
+    fi
+
+    # If standard getopt isn't GNU, check common Homebrew paths explicitly
+    local brew_getopt
+    # Check potential Homebrew paths (Apple Silicon and Intel)
+    for brew_getopt in "/opt/homebrew/opt/gnu-getopt/bin/getopt" "/usr/local/opt/gnu-getopt/bin/getopt"; do
+         if [ -x "$brew_getopt" ]; then
+             log_debug "Found compatible GNU getopt at: $brew_getopt"
+             GNU_GETOPT_CMD="$brew_getopt"
+             return 0
+         fi
+    done
+
+    # Check if gnu-getopt is in PATH (might be linked differently)
+     if command -v gnu-getopt >/dev/null 2>&1; then
+        log_debug "Found compatible GNU getopt via command: gnu-getopt"
+        GNU_GETOPT_CMD=$(command -v gnu-getopt)
+        return 0
+    fi
+
+    # If we reach here, no compatible getopt was found
+    log_error "GNU getopt not found. Please install it (e.g., 'brew install gnu-getopt') and ensure it's in your PATH or linked correctly."
+    return 1
+}
 
 # ------------------------------------------------------------------------------
 # --- Logging Functions ---
@@ -1850,72 +1904,117 @@ _script_exit_handler() {
 #             run_interactive_menu. External commands: mktemp, printf.
 # ---
 main() {
-    # --- Argument Parsing ---
-    # Loop through arguments, update global ACTION, IS_VERBOSE, source_key_file.
-    # Sets local parse_error=1 if invalid options/arguments are found.
-    # Allows only the *first* action flag encountered to set the ACTION.
-    local parse_error=0          # Flag for parsing errors.
-    local FIRST_ACTION_SET=0     # Flag to ensure only one action is processed.
-    local args_copy=("$@")       # Copy arguments to avoid issues with modifying $@.
-    local i=0
-    while [ $i -lt ${#args_copy[@]} ]; do
-        local arg="${args_copy[$i]}"
-        case $arg in
-        -l|--list)
-                if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="list"; FIRST_ACTION_SET=1; fi
-                i=$((i + 1)) ;;
-        -a|--add)
-                if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="add"; FIRST_ACTION_SET=1; fi
-                i=$((i + 1)) ;;
-        -f|--file)
-                 # Expects a filename as the next argument.
-                 local next_arg_index=$((i + 1))
-                 local next_arg="${args_copy[$next_arg_index]:-}" # Get next arg or empty string if none.
-                 # Check if next argument exists and doesn't look like another option.
-                 if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
-                     printf "Error: Option '%s' requires a filename argument.\\n\\n" "$arg" >&2
-                     ACTION="help"; parse_error=1; break # Force help display and mark error.
-                 fi
-                 # Set action only if it's the first one.
-                 if [ "$FIRST_ACTION_SET" -eq 0 ]; then
-                     ACTION="file"; source_key_file="$next_arg"; FIRST_ACTION_SET=1
-                 else
-                      printf "Warning: Ignoring subsequent action flag '%s' after action '%s' was already set.\\n" "$arg" "$ACTION" >&2
-                 fi
-                 i=$((i + 2)) ;; # Consume both -f and filename.
-        -D|--delete-all)
-                if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="delete-all"; FIRST_ACTION_SET=1; fi
-                i=$((i + 1)) ;;
-        -m|--menu)
-                if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="menu"; FIRST_ACTION_SET=1; fi
-                i=$((i + 1)) ;;
-        -v|--verbose)
-                IS_VERBOSE="true" # Set global flag for verbose logging.
-                i=$((i + 1)) ;;
-        -h|--help)
-                # Help action can override previous actions if encountered.
-                ACTION="help"; FIRST_ACTION_SET=1; parse_error=0 # Explicit help is not an error.
-                i=$((i + 1)) ;;
-            *) # Unknown option.
-                printf "Error: Unknown option '%s'\\n\\n" "$arg" >&2
-                ACTION="help"; parse_error=1; break # Force help display and mark error.
-            ;;
-    esac
-done
-
-    # --- Runtime Initialization ---
-
-    # Setup logging. This must happen after IS_VERBOSE might be set by args.
+    # --- Setup Logging FIRST --- 
     if ! setup_logging; then
-        # setup_logging already prints warnings.
-        printf "Warning: Logging setup failed. Continuing with logging disabled.\\n" >&2
-        # LOG_FILE remains /dev/null (default), logging functions will be no-ops.
+        printf "Warning: Logging setup failed. Continuing with logging disabled.\n" >&2
     fi
 
-    # Log initial state and configuration (only works if setup_logging succeeded).
-    log_debug "--- Script Start ---"
+    # --- Argument Parsing --- Initial values
+    local parse_error=0
+    local FIRST_ACTION_SET=0 # Needed for the simple parser fallback
+    # ACTION, IS_VERBOSE, source_key_file are global and have defaults
+
+    # --- Check for GNU getopt and Select Parsing Strategy --- 
+    if _check_gnu_getopt; then 
+        # --- Use GNU Getopt Parsing --- (GNU getopt found on this system)
+        log_debug "Using GNU getopt ($GNU_GETOPT_CMD) for argument parsing."
+        local short_opts="laf:Dmhv"
+        local long_opts="list,add,file:,delete-all,menu,help,verbose"
+        local ARGS
+        if ! ARGS=$($GNU_GETOPT_CMD -o "$short_opts" --long "$long_opts" -n "$(basename "$0")" -- "$@"); then
+            log_error "Argument parsing error ($GNU_GETOPT_CMD failed)."
+            exit 1 # Exit here, as getopt failed unexpectedly
+        fi
+        eval set -- "$ARGS"
+        while true; do
+            case "$1" in
+                -l|--list)
+                    ACTION="list"
+                    shift ;;
+                -a|--add)
+                    ACTION="add"
+                    shift ;;
+                -f|--file)
+                    ACTION="file"; source_key_file="$2"
+                    shift 2 ;;
+                -D|--delete-all)
+                    ACTION="delete-all"
+                    shift ;;
+                -m|--menu)
+                    ACTION="menu"
+                    shift ;;
+                -v|--verbose)
+                    IS_VERBOSE="true"
+                    shift ;;
+                -h|--help)
+                    ACTION="help"
+                    parse_error=0
+                    shift ;;
+                --)
+                    shift
+                    break ;;
+                *)
+                    log_error "Internal error during getopt argument processing near '$1'"
+                    ACTION="help"; parse_error=1; break ;;
+            esac
+        done
+    else
+        # --- Use Simple Parsing Fallback --- (GNU getopt not found or check failed)
+        # _check_gnu_getopt already logged the error
+        printf "Warning: GNU getopt not found or incompatible. Using simple parser.\n         Combined/long options unsupported. Install GNU getopt (e.g., 'brew install gnu-getopt' on macOS).\n" >&2
+
+        local args_copy=("$@")
+        local i=0
+        while [ $i -lt ${#args_copy[@]} ]; do
+            local arg="${args_copy[$i]}"
+            case $arg in
+            -l)
+                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="list"; FIRST_ACTION_SET=1; fi
+                    i=$((i + 1)) ;;
+            -a)
+                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="add"; FIRST_ACTION_SET=1; fi
+                    i=$((i + 1)) ;;
+            -f)
+                     local next_arg_index=$((i + 1))
+                     local next_arg="${args_copy[$next_arg_index]:-}"
+                     if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
+                         printf "Error: Option '%s' requires a filename argument.\n\n" "$arg" >&2
+                         ACTION="help"; parse_error=1; break
+                     fi
+                     if [ "$FIRST_ACTION_SET" -eq 0 ]; then
+                         ACTION="file"; source_key_file="$next_arg"; FIRST_ACTION_SET=1
+                     else
+                          log_warn "Ignoring subsequent action flag '%s' after action '%s' was already set (simple parser)." "$arg" "$ACTION"
+                     fi
+                     i=$((i + 2)) ;;
+            -D)
+                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="delete-all"; FIRST_ACTION_SET=1; fi
+                    i=$((i + 1)) ;;
+            -m)
+                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="menu"; FIRST_ACTION_SET=1; fi
+                    i=$((i + 1)) ;;
+            -v)
+                    IS_VERBOSE="true"
+                    i=$((i + 1)) ;;
+            -h)
+                    ACTION="help"; FIRST_ACTION_SET=1; parse_error=0
+                    i=$((i + 1)) ;;
+                *) # Unknown option or combined options like -lv with simple parser
+                    if [[ "$arg" == -* && ${#arg} -gt 2 ]]; then
+                         # This condition likely won't be hit often now, but keep for clarity
+                        printf "Error: Combined options like '%s' not supported by simple parser.\n" "$arg" >&2
+                    else
+                        printf "Error: Unknown option '%s'\n\n" "$arg" >&2
+                    fi
+                    ACTION="help"; parse_error=1; break
+                ;;
+            esac
+        done
+    fi
+
+    # --- Runtime Initialization (Post-Parsing) ---
+    log_debug "--- Script Start Checkpoint (Post-Parsing) ---"
     log_debug "Timestamp: $_script_start_time"
-    log_debug "Arguments: $*"
     log_debug "Parsed Action: '$ACTION'"
     log_debug "Verbose Logging: '$IS_VERBOSE'"
     log_debug "Source Key File: '${source_key_file:-N/A}'"
@@ -1929,40 +2028,41 @@ done
     log_debug "Log Filename: $LOG_FILENAME"
     log_debug "Log File Path: $LOG_FILE"
 
-    # Create Temporary File for `find` results. Needs to be done *after* logging setup
-    # so potential errors can be logged. Assign path to global KEYS_LIST_TMP.
     if ! KEYS_LIST_TMP=$(mktemp "${TMPDIR:-/tmp}/ssh_keys_list.XXXXXX"); then
         log_error "Fatal: Failed to create temporary file using mktemp. Check permissions in '${TMPDIR:-/tmp}'."
-        printf "Error: Could not create required temporary file. Exiting.\\n" >&2
-        exit 1 # Critical failure, cannot proceed.
+        printf "Error: Could not create required temporary file. Exiting.\n" >&2
+        exit 1
     fi
     log_debug "Temporary file created: $KEYS_LIST_TMP"
-    # Temp file will be removed by the EXIT trap handler.
 
     # --- Dispatch Action ---
-    # Execute the function corresponding to the determined ACTION.
     log_info "Selected action: $ACTION"
-case $ACTION in
-        list)       run_list_keys ;;               # Exits script internally.
-        add)        run_load_keys ;;               # Exits script internally.
-        file)       run_load_keys_from_file "$source_key_file" ;; # Exits script internally.
-        delete-all) run_delete_all_cli ;;          # Exits script internally.
-        menu)       run_interactive_menu ;;        # Exits script internally (on quit).
-        help|*)     # Default action or explicit help.
-            display_help # Display the help message.
-            if [ "$parse_error" -eq 1 ]; then
-                exit 1 # Exit with error status if help was shown due to a parsing error.
-            else
-                exit 0 # Exit successfully if help was default or explicit -h/--help.
-            fi
-        ;;
-esac
 
-    # This point should ideally not be reached if dispatch logic and called functions are correct
-    # (as they should exit the script). If reached, it indicates an unexpected control flow error.
+    case $ACTION in
+        list)
+             run_list_keys ;;
+        add)
+             run_load_keys ;;
+        file)
+            run_load_keys_from_file "$source_key_file" ;;
+        delete-all)
+            run_delete_all_cli ;;
+        menu)
+            run_interactive_menu ;;
+        help|*)
+             display_help
+            if [ "$parse_error" -eq 1 ]; then
+                exit 1
+            else
+                exit 0
+            fi
+            ;;
+    esac
+
+    # This point should ideally not be reached
     log_error "Critical Error: Script main function reached end unexpectedly after dispatching action: $ACTION."
-    printf "Error: Unexpected script termination. Please check logs: %s\\n" "${LOG_FILE:-N/A}" >&2
-    exit 1 # Exit with error for unexpected fallthrough.
+    printf "Error: Unexpected script termination. Please check logs: %s\n" "${LOG_FILE:-N/A}" >&2
+    exit 1
 }
 
 # ==============================================================================
