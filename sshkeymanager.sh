@@ -20,9 +20,9 @@
 # - Comprehensive logging system with rotation
 # - Directory validation and management
 #
-# Author: [Your Name]
-# Version: 1.0.0
-# License: MIT
+# Author: Gaurav Gupta
+# Version: 0.0.1.2
+# License: BSD 3-Clause
 #
 
 # ==============================================================================
@@ -39,10 +39,14 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 # --- Source Libraries ---
 source "$SCRIPT_DIR/lib/logging.sh" || { echo "Error: Failed to source logging library." >&2; exit 1; }
 source "$SCRIPT_DIR/lib/validation.sh" || { echo "Error: Failed to source validation library." >&2; exit 1; }
+source "$SCRIPT_DIR/lib/helpers.sh" || { echo "Error: Failed to source helpers library." >&2; exit 1; }
 source "$SCRIPT_DIR/lib/arg_helpers.sh" || { echo "Error: Failed to source argument helper library." >&2; exit 1; }
+# DEBUG: Check if function exists immediately after sourcing arg_helpers.sh
+#declare -F _check_gnu_getopt > /dev/null && echo "DEBUG: _check_gnu_getopt IS defined after sourcing arg_helpers.sh" || echo "DEBUG: _check_gnu_getopt IS NOT defined after sourcing arg_helpers.sh"
 source "$SCRIPT_DIR/lib/agent.sh" || { echo "Error: Failed to source agent library." >&2; exit 1; }
 source "$SCRIPT_DIR/lib/key_ops.sh" || { echo "Error: Failed to source key operations library." >&2; exit 1; }
 source "$SCRIPT_DIR/lib/menu.sh" || { echo "Error: Failed to source menu library." >&2; exit 1; }
+source "$SCRIPT_DIR/lib/cli.sh" || { echo "Error: Failed to source cli library." >&2; exit 1; }
 
 # --- Global Variable Declarations ---
 # These variables are used throughout the script. Default values are provided,
@@ -563,118 +567,44 @@ main() {
     local FIRST_ACTION_SET=0 # Initialize flag for simple parser action tracking
 
     # --- Setup Logging FIRST ---
-if ! setup_logging; then
+    if ! setup_logging; then
         printf "Warning: Logging setup failed. Continuing with logging disabled.\n" >&2
     fi
-    # Log script start marker *after* setup_logging attempt
     _log_marker "_______<=:START:=> SSH Key Manager Script______"
 
-    # --- Check for GNU getopt and Select Parsing Strategy --- 
-    if _check_gnu_getopt; then 
-        # --- Use GNU Getopt Parsing --- (GNU getopt found on this system)
-        log_debug "Using GNU getopt ($GNU_GETOPT_CMD) for argument parsing."
-        local short_opts="laf:Dmhv"
-        local long_opts="list,add,file:,delete-all,menu,help,verbose"
-        local ARGS
-        if ! ARGS=$($GNU_GETOPT_CMD -o "$short_opts" --long "$long_opts" -n "$(basename "$0")" -- "$@"); then
-            log_error "Argument parsing error ($GNU_GETOPT_CMD failed)."
-            exit 1 # Exit here, as getopt failed unexpectedly
-        fi
-        eval set -- "$ARGS"
-        while true; do
-            case "$1" in
-        -l|--list)
-            ACTION="list"
-                    shift ;;
-        -a|--add)
-            ACTION="add"
-                    shift ;;
-        -f|--file)
-                    ACTION="file"; source_key_file="$2"
-                    shift 2 ;;
-        -D|--delete-all)
-            ACTION="delete-all"
-                    shift ;;
-        -m|--menu)
-            ACTION="menu"
-                    shift ;;
-        -v|--verbose)
-            IS_VERBOSE="true"
-                    shift ;;
-        -h|--help)
-            ACTION="help"
-                    parse_error=0
-                    shift ;;
-                --)
-                    shift
-                    break ;;
-                *)
-                    log_error "Internal error during getopt argument processing near '$1'"
-                    ACTION="help"; parse_error=1; break ;;
-            esac
-        done
-    else
-        # --- Use Simple Parsing Fallback --- (GNU getopt not found or check failed)
-        # _check_gnu_getopt already logged the error
-        # Log this as info, as fallback works but lacks features. Avoids user-facing warning.
-        log_info "GNU getopt not found or incompatible. Using simple parser. Combined/long options unsupported. Recommendation: Install GNU getopt (e.g., 'brew install gnu-getopt' on macOS) for full argument support."
+    # --- Setup Platform Variables ---
+    # Call the function sourced from lib/helpers.sh
+    setup_platform_vars # Sets $PLATFORM and $STAT_CMD
 
-        local args_copy=("$@")
-        local i=0
-        while [ $i -lt ${#args_copy[@]} ]; do
-            local arg="${args_copy[$i]}"
-            case $arg in
-            -l)
-                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="list"; FIRST_ACTION_SET=1; fi
-                    i=$((i + 1)) ;;
-            -a)
-                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="add"; FIRST_ACTION_SET=1; fi
-                    i=$((i + 1)) ;;
-            -f)
-                     local next_arg_index=$((i + 1))
-                     local next_arg="${args_copy[$next_arg_index]:-}"
-                     if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
-                         printf "Error: Option '%s' requires a filename argument.\n\n" "$arg" >&2
-                         ACTION="help"; parse_error=1; break
-                     fi
-                     if [ "$FIRST_ACTION_SET" -eq 0 ]; then
-                         ACTION="file"; source_key_file="$next_arg"; FIRST_ACTION_SET=1
-                     else
-                          log_warn "Ignoring subsequent action flag '%s' after action '%s' was already set (simple parser)." "$arg" "$ACTION"
-                     fi
-                     i=$((i + 2)) ;;
-            -D)
-                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="delete-all"; FIRST_ACTION_SET=1; fi
-                    i=$((i + 1)) ;;
-            -m)
-                    if [ "$FIRST_ACTION_SET" -eq 0 ]; then ACTION="menu"; FIRST_ACTION_SET=1; fi
-                    i=$((i + 1)) ;;
-            -v)
-                    IS_VERBOSE="true"
-                    i=$((i + 1)) ;;
-            -h)
-                    ACTION="help"; FIRST_ACTION_SET=1; parse_error=0
-                    i=$((i + 1)) ;;
-                *) # Unknown option or combined options like -lv with simple parser
-                    if [[ "$arg" == -* && ${#arg} -gt 2 ]]; then
-                         # This condition likely won't be hit often now, but keep for clarity
-                        printf "Error: Combined options like '%s' not supported by simple parser.\n" "$arg" >&2
-                    else
-                        printf "Error: Unknown option '%s'\n\n" "$arg" >&2
-                    fi
-                    ACTION="help"; parse_error=1; break
-            ;;
-    esac
-done
+    # --- Create Temporary File ---
+    # This needs to happen *before* parsing arguments, as some actions might use it immediately.
+    # However, some argument parsing errors might occur before this, so cleanup trap must handle $KEYS_LIST_TMP potentially being unset.
+    if ! KEYS_LIST_TMP=$(mktemp "${TMPDIR:-/tmp}/ssh_keys_list.XXXXXX"); then
+        log_error "Fatal: Failed to create temporary file using mktemp. Check permissions in '${TMPDIR:-/tmp}'."
+        printf "Error: Could not create required temporary file. Exiting.\n" >&2
+        exit 1
+    fi
+    log_debug "Temporary file created: $KEYS_LIST_TMP"
+
+    # --- Argument Parsing ---
+    # DEBUG: Check if function exists just before calling parse_args
+    #declare -F _check_gnu_getopt > /dev/null && echo "DEBUG: _check_gnu_getopt IS defined before calling parse_args" || echo "DEBUG: _check_gnu_getopt IS NOT defined before calling parse_args"
+    # Call the argument parsing function from lib/cli.sh
+    # It will populate the global ACTION and source_key_file variables.
+    # It will also handle --help internally and exit if needed.
+    # It returns 0 on success, 1 on parsing error (which should trigger help).
+    if ! parse_args "$@"; then
+        usage # Show help message on parsing error
+        exit 1
     fi
 
-    # --- Runtime Initialization (Post-Parsing) ---
+    # --- Runtime Initialization Check (Post-Parsing) ---
     log_debug "--- Script Start Checkpoint (Post-Parsing) ---"
     log_debug "Timestamp: $_script_start_time"
     log_debug "Parsed Action: '$ACTION'"
     log_debug "Verbose Logging: '$IS_VERBOSE'"
     log_debug "Source Key File: '${source_key_file:-N/A}'"
-    log_debug "Argument Parse Error: ${parse_error:-UNKNOWN}" # Use parameter expansion default
+    # log_debug "Argument Parse Error: ${parse_error:-UNKNOWN}" # parse_error is now handled within parse_args
     log_debug "Platform: $PLATFORM"
     log_debug "Stat Command: $STAT_CMD"
     log_debug "SSH Directory: $SSH_DIR"
@@ -683,39 +613,27 @@ done
     log_debug "Log Directory: $LOG_DIR"
     log_debug "Log Filename: $LOG_FILENAME"
     log_debug "Log File Path: $LOG_FILE"
+    log_debug "Temporary file: $KEYS_LIST_TMP"
 
-    if ! KEYS_LIST_TMP=$(mktemp "${TMPDIR:-/tmp}/ssh_keys_list.XXXXXX"); then
-        log_error "Fatal: Failed to create temporary file using mktemp. Check permissions in '${TMPDIR:-/tmp}'."
-        printf "Error: Could not create required temporary file. Exiting.\n" >&2
-        exit 1
-    fi
-    log_debug "Temporary file created: $KEYS_LIST_TMP"
 
     # --- Dispatch Action ---
     log_info "Selected action: $ACTION"
 
-case $ACTION in
-    list)
-             run_list_keys ;;
-    add)
-             run_load_keys ;;
-    file)
-            run_load_keys_from_file "$source_key_file" ;;
-    delete-all)
-            run_delete_all_cli ;;
-    menu)
-            run_interactive_menu ;;
-    help|*)
-        display_help
-            if [ "$parse_error" -eq 1 ]; then
-                exit 1
-            else
-                exit 0
-            fi
-        ;;
-esac
+    case $ACTION in
+        list)       run_list_keys ;; # Now defined in lib/cli.sh
+        add)        run_load_keys ;; # Now defined in lib/cli.sh
+        file)       run_load_keys_from_file "$source_key_file" ;; # Now defined in lib/cli.sh
+        delete-all) run_delete_all_cli ;; # Now defined in lib/cli.sh
+        menu)       run_interactive_menu ;; # Now defined in lib/menu.sh
+        generate)   run_generate_key ;; # Assumes defined in lib/cli.sh or key_ops.sh
+        delete-pair) run_delete_key_pair ;; # Assumes defined in lib/cli.sh or key_ops.sh
+        help|*)     # Should not be reached if parse_args handles help correctly
+                    usage
+                    exit 0 ;;
+    esac
 
-    # This point should ideally not be reached
+    # The dispatched action function should handle exiting.
+    # If we reach here, something went wrong.
     log_error "Critical Error: Script main function reached end unexpectedly after dispatching action: $ACTION."
     printf "Error: Unexpected script termination. Please check logs: %s\n" "${LOG_FILE:-N/A}" >&2
     exit 1
