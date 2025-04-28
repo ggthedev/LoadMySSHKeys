@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Mock ssh-add for testing
+
+# Determine TEST_TEMP_DIR based on the mock script's location
+# $0 = /path/to/TEST_TEMP_DIR/bin/ssh-add
+MOCK_BIN_DIR=$(dirname "$0")
+TEST_TEMP_DIR=$(dirname "$MOCK_BIN_DIR") # Go up one level from /bin
+
+# Use a file within the determined TEST_TEMP_DIR to represent the keys
+MOCK_AGENT_KEYS_FILE="$TEST_TEMP_DIR/mock_agent_keys.txt"
+
+# Debug: Print determined paths to FD 3 (Bats debug stream)
+echo "Mock ssh-add: Determined TEST_TEMP_DIR=[$TEST_TEMP_DIR]" >&3
+echo "Mock ssh-add: Using state file=[$MOCK_AGENT_KEYS_FILE]" >&3
+
+# Ensure the state file exists
+touch "$MOCK_AGENT_KEYS_FILE"
+
+case "$1" in
+  -l)
+    # List keys: Output content of the file, exit 0 if non-empty, 1 if empty
+    if [ -s "$MOCK_AGENT_KEYS_FILE" ]; then
+      # Simulate output format (e.g., 2048 SHA256:fake key_basename (RSA))
+      while IFS= read -r key; do
+        # Skip empty lines that might have been added erroneously before
+        [ -z "$key" ] && continue
+        echo "2048 SHA256:FAKEKEYHASH${key} $(basename "$key") (MOCK_TYPE)"
+      done < "$MOCK_AGENT_KEYS_FILE"
+      exit 0
+    else
+      echo "The agent has no identities."
+      exit 1
+    fi
+    ;;
+  -D)
+    # Delete all: Clear the file
+    > "$MOCK_AGENT_KEYS_FILE"
+    echo "All identities removed."
+    exit 0
+    ;;
+  -d)
+    # Delete specific: Remove the key (basename) from the file
+    key_to_delete=$(basename "$2")
+    if grep -q "^${key_to_delete}$" "$MOCK_AGENT_KEYS_FILE"; then
+      grep -v "^${key_to_delete}$" "$MOCK_AGENT_KEYS_FILE" > "${MOCK_AGENT_KEYS_FILE}.tmp"
+      mv "${MOCK_AGENT_KEYS_FILE}.tmp" "$MOCK_AGENT_KEYS_FILE"
+      echo "Identity removed: $2 ($key_to_delete)"
+      exit 0
+    else
+      echo "Could not remove identity \"$2\": agent refused operation"
+      exit 1 # Key not found
+    fi
+    ;;
+  ""|-h|--help)
+    # Handle empty args or help flags
+    echo "Usage: mock-ssh-add [-l] [-D] [-d key] [key] ..."
+    exit 1
+    ;;
+  *)
+    # Add key(s): Append basename of file path(s) to the state file
+    echo "Mock ssh-add: Add key case triggered with args: [$@]" >&3
+    echo "Mock ssh-add: Using state file: [$MOCK_AGENT_KEYS_FILE]" >&3
+    key_added=0
+    # Iterate through all arguments
+    args_to_process=("$@")
+    i=0
+    while [ $i -lt ${#args_to_process[@]} ]; do
+      arg="${args_to_process[$i]}"
+      # Check if the argument is the macOS flag and ignore it
+      if [ "$arg" = "--apple-use-keychain" ]; then
+        echo "Mock ssh-add: Ignoring macOS flag [$arg]" >&3
+        i=$((i + 1))
+        continue # Skip to next argument
+      fi
+
+      # Assume any other argument is a key path
+      key_path="$arg"
+      echo "Mock ssh-add: Processing key path: [$key_path]" >&3
+      key_basename=$(basename "$key_path")
+      echo "Mock ssh-add: Extracted basename: [$key_basename]" >&3
+      # Avoid adding duplicates or empty lines
+      if [ -n "$key_basename" ] && ! grep -q "^${key_basename}$" "$MOCK_AGENT_KEYS_FILE"; then
+        echo "Mock ssh-add: Adding [$key_basename] to state file." >&3
+        echo "$key_basename" >> "$MOCK_AGENT_KEYS_FILE"
+        echo "Identity added: $key_path ($key_basename)"
+        key_added=1
+      else
+         echo "Mock ssh-add: [$key_basename] already in state file or empty." >&3
+         # Print success message even if key already existed, mimicking ssh-add behavior
+         echo "Identity added: $key_path ($key_basename)" # Or: "Identity already exists..."
+      fi
+      i=$((i + 1))
+    done
+    exit 0 # Simulate success even if key already existed
+    ;;
+esac 
