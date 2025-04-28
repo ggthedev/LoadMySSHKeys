@@ -86,47 +86,58 @@ setup_logging() {
     fi
 
     # --- Create Log Directory (with Fallback) ---
-    local initial_log_dir="$LOG_DIR" # Store the initially determined directory for messages.
-    # Attempt to create the chosen log directory (including parent directories).
-    # Redirect stderr to suppress "File exists" messages.
-    if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-        # If creation failed, print warning and try the fallback directory.
-        printf "Warning: Could not create log directory '%s'. Trying fallback '%s'.\n" "$initial_log_dir" "$LOG_DIR_FALLBACK" >&2
+    local initial_log_dir="$LOG_DIR"
+    local mkdir_status
+    
+    # Attempt to create the chosen log directory, capture status
+    mkdir -p "$LOG_DIR"
+    mkdir_status=$?
+    # printf "DEBUG_TERM: mkdir status for initial LOG_DIR (%s): %s\n" "$LOG_DIR" "$mkdir_status" >&2 # DEBUG Removed
+
+    # Check the captured status explicitly
+    if [ "$mkdir_status" -ne 0 ]; then 
+        local msg="Warning: Could not create log directory '$initial_log_dir' (Status: $mkdir_status). Trying fallback '$LOG_DIR_FALLBACK'."
+        # Append warning to log file if possible, else print to stderr
+        if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg" >> "$LOG_FILE"; else printf "%s\n" "$msg" >&2; fi
         LOG_DIR="$LOG_DIR_FALLBACK"
-        # Attempt to create the fallback directory.
-        if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-            # If even the fallback fails, disable logging.
-            printf "Warning: Could not create fallback log directory '%s'. Logging disabled.\n" "$LOG_DIR" >&2
-            LOG_FILE="/dev/null" # Set log file to /dev/null to effectively disable logging.
-            return 1 # Indicate logging setup failure.
+        
+        # Attempt to create the fallback directory, capture status
+        local mkdir_fallback_status
+        mkdir -p "$LOG_DIR"
+        mkdir_fallback_status=$?
+        # printf "DEBUG_TERM: mkdir status for fallback LOG_DIR (%s): %s\n" "$LOG_DIR" "$mkdir_fallback_status" >&2 # DEBUG Removed
+
+        if [ "$mkdir_fallback_status" -ne 0 ]; then 
+            local msg2="Warning: Could not create fallback log directory '$LOG_DIR' (Status: $mkdir_fallback_status). Logging disabled."
+            # Append warning to log file if possible, else print to stderr
+            if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg2" >> "$LOG_FILE"; else printf "%s\n" "$msg2" >&2; fi
+            LOG_FILE="/dev/null"
+            return 1
         fi
-         # If fallback creation succeeded, inform the user.
-         printf "Warning: Using fallback log directory '%s'.\n" "$LOG_DIR" >&2
+        local msg3="Warning: Using fallback log directory '$LOG_DIR'."
+        # Append warning to log file if possible, else print to stderr
+        if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg3" >> "$LOG_FILE"; else printf "%s\n" "$msg3" >&2; fi
     fi
 
     # --- Set Log File Path ---
-    # Construct the full path to the log file.
     LOG_FILE="${LOG_DIR}/${LOG_FILENAME}"
 
     # --- Create Log File (if needed) ---
-    # Ensure the log file exists. If it doesn't, create it.
-    # Redirect stderr to suppress errors if the file exists but isn't writable temporarily (permissions fixed later).
     if ! touch "$LOG_FILE" 2>/dev/null; then
-        # If the file cannot be created (e.g., directory not writable), disable logging.
-        printf "Warning: Could not create log file '%s'. Logging disabled.\n" "$LOG_FILE" >&2
+        local msg="Warning: Could not create log file '$LOG_FILE'. Logging disabled."
+        # Print to stderr as LOG_FILE setup failed
+        printf "%s\n" "$msg" >&2
         LOG_FILE="/dev/null"
-        return 1 # Indicate logging setup failure.
+        return 1
     fi
 
     # --- Log Rotation ---
-    # Check if the log file exists and needs rotation (based on size).
     if [ -f "$LOG_FILE" ]; then
         local log_size
-        # Get the current log file size using the platform-specific command.
-        # Redirect stderr in case of issues reading file size (e.g., permissions).
         if ! log_size=$($STAT_CMD "$LOG_FILE" 2>/dev/null); then
-            # If size cannot be determined, skip rotation and warn user.
-            printf "Warning: Could not determine size of log file '%s'. Log rotation skipped.\n" "$LOG_FILE" >&2
+            local msg="Warning: Could not determine size of log file '$LOG_FILE'. Log rotation skipped."
+            # Append warning to log file if possible
+            if [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg" >> "$LOG_FILE"; else printf "%s\n" "$msg" >&2; fi
         elif [ "$log_size" -gt "$max_log_size" ]; then
             # If log size exceeds the maximum, perform rotation.
             # Log rotation start only if verbose mode is enabled.
@@ -152,13 +163,17 @@ setup_logging() {
             touch "$LOG_FILE" 2>/dev/null || printf "Warning: Failed to create new log file after rotation: %s\n" "$LOG_FILE" >&2
             # Clean up temporary debug log if created
             rm -f "$LOG_FILE.prerotate_debug" 2>/dev/null
+            local rot_warn_msg=""
+            # Append rotation warning to log file if it occurred
+            if [ -n "$rot_warn_msg" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$rot_warn_msg" >> "$LOG_FILE"; fi
         fi
     fi
 
     # --- Set Permissions ---
-    # Set log file permissions to read/write for owner only (600).
-    # Redirect stderr to suppress errors if permissions cannot be set (e.g., file system issues).
-    chmod 600 "$LOG_FILE" 2>/dev/null || printf "Warning: Could not set permissions (600) on log file: %s\n" "$LOG_FILE" >&2
+    local perm_warn_msg=""
+    chmod 600 "$LOG_FILE" 2>/dev/null || perm_warn_msg="Warning: Could not set permissions (600) on log file: $LOG_FILE"
+    # Append permission warning to log file if it occurred
+    if [ -n "$perm_warn_msg" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$perm_warn_msg" >> "$LOG_FILE"; fi
 
     # --- Final Log Message (Requires working logging) ---
     # Log the successful setup and the final log file path.
