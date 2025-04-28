@@ -60,24 +60,31 @@ A comprehensive SSH key management tool that provides a menu-driven interface fo
 
 ## Usage
 
-### Command-Line Options
+The script can be run with various command-line options or using an interactive menu.
 
+```bash
+./sshkeymanager.sh [OPTIONS]
 ```
-sshkeymanager [OPTIONS]
 
-Options:
-  -l, --list          List keys currently loaded in the ssh-agent.
-  -a, --add           Finds potential private key files (with matching .pub)
-                      in the SSH directory, deletes all existing keys
-                      from the agent, then adds the found keys.
-  -f <file>, --file <file>
-                      Deletes all existing keys from the agent, then adds keys whose
-                      basenames are listed in the specified <file>.
-  -D, --delete-all    Delete all keys currently loaded in the ssh-agent.
-  -m, --menu          Show the interactive text-based menu interface.
-  -v, --verbose       Enable verbose (DEBUG level) logging.
-  -h, --help          Display help message and exit.
+**Options:**
+
+*   `-l`, `--list`: List keys currently loaded in the ssh-agent.
+*   `-a`, `--add`: Find potential keys, clear agent, add found keys.
+*   `-f <file>`, `--file <file>`: Load keys listed in `<file>` after clearing agent.
+*   `-D`, `--delete-all`: Delete all keys from agent (prompts for confirmation).
+*   `-m`, `--menu`: Show the interactive text-based menu interface.
+*   `-v`, `--verbose`: Enable verbose (DEBUG level) logging.
+*   `-h`, `--help`: Display the help message.
+
+**macOS Argument Parsing Note:**
+
+While the script functions on macOS without extra dependencies, installing `gnu-getopt` is recommended for the best command-line experience:
+
+```bash
+brew install gnu-getopt
 ```
+
+This enables support for features like combined short options (e.g., `-lv`) and long options (e.g., `--list`) which the default macOS `getopt` does not handle. If `gnu-getopt` is not installed, the script will fall back to a simpler parser, and only single short options (e.g., `-l -v`) will work.
 
 ### Interactive Menu Mode (`sshkeymanager -m`)
 
