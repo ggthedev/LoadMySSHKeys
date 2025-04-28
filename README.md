@@ -143,6 +143,58 @@ Log files are rotated when they reach 1MB in size, keeping up to 5 backup files.
 - Use the `-v` (verbose) flag to enable debug logging for more detailed information.
 - Check the log file specified by option `6` in the menu.
 
+## Testing
+
+This project uses [Bats-core](https://github.com/bats-core/bats-core) for testing the `sshkeymanager.sh` script's behavior.
+
+### Dependencies
+
+- **Bats-core:** You need `bats` installed to run the tests. You can typically install it using a package manager:
+  - **Homebrew (macOS/Linux):** `brew install bats-core`
+  - **npm:** `npm install -g bats`
+  - Refer to the [Bats-core documentation](https://github.com/bats-core/bats-core#installation) for other installation methods.
+
+### Running Tests
+
+All test commands should be run from the root directory of this project.
+
+#### Running All Tests
+
+To execute the entire test suite located in the `test/` directory:
+
+```bash
+bats test/cli_behavior.bats
+```
+
+#### Running Specific Tests
+
+You can run individual tests or groups of tests using the `-f` or `--filter` flag, which matches the provided regular expression against test names.
+
+For example, to run only Test 5, named `"5. CLI: -l (list keys) after -a should show keys added by real ssh-add"`:
+
+```bash
+bats -f "5\. CLI: -l \(list keys\) after -a should show keys added by real ssh-add" test/cli_behavior.bats
+```
+
+**Important:** Notice the backslashes (`\`) before the `.` and `()`. These are necessary because the filter uses regular expressions, and these characters have special meaning in regex. Escaping them ensures they are matched literally as part of the test name.
+
+#### Verbose Output
+
+To see more detailed output during test execution, add the `--verbose-run` flag to any `bats` command:
+
+```bash
+bats --verbose-run test/cli_behavior.bats
+```
+
+## `ssh_agent_setup.sh` - Automated Agent Setup (for Sourcing)
+
+This script is designed to be **sourced** by your shell's startup files (preferably `.zprofile` or `.profile`) to ensure a single `ssh-agent` is running per login session and that necessary environment variables (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`) are exported correctly for process inheritance.
+
+### Purpose
+
+- Ensures a single `ssh-agent` is running per login session.
+- Exports `SSH_AUTH_SOCK` and `SSH_AGENT_PID` for use by subsequent processes.
+
 ## Contributing
 
 Contributions are welcome! Please follow these steps:
@@ -171,17 +223,12 @@ This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICE
 
 ## Version History
 
-- 1.0.0 (2024-03-14)
+- 0.0.1.2 (2025-04-28) 
+  - Refactored code into modular library files (`lib/*.sh`).
+  - Added Bats testing framework (`test/cli_behavior.bats`).
+  - Updated test suite to use real `ssh-agent` and dynamic key generation.
+- 0.0.1 (2024-03-14)
   - Initial release
   - Basic key management functionality
   - Cross-platform support
   - Logging system
-
-## `ssh_agent_setup.sh` - Automated Agent Setup (for Sourcing)
-
-This script is designed to be **sourced** by your shell's startup files (preferably `.zprofile` or `.profile`) to ensure a single `ssh-agent` is running per login session and that necessary environment variables (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`) are exported correctly for process inheritance.
-
-### Purpose
-
-- Ensures a single `ssh-agent` is running per login session.
-- Exports `SSH_AUTH_SOCK` and `SSH_AGENT_PID` for use by subsequent processes.
