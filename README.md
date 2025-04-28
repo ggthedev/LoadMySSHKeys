@@ -40,9 +40,9 @@ A comprehensive SSH key management tool that provides a menu-driven interface fo
 1. Download the script:
 
    ```bash
-   curl -o sshkeymanager.sh https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/sshkeymanager.sh # Replace with the actual raw URL
+   curl -o sshkeymanager.sh https://raw.githubusercontent.com/ggthedev/SSHKEYSMANAGER/refs/heads/main/sshkeymanager.sh # Replace with the actual raw URL
    # OR clone the repository
-   # git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+   # git clone https://github.com/ggthedev/SSHKEYSMANAGER.git
    # cd YOUR_REPO
    ```
 

@@ -220,6 +220,21 @@ log_debug() {
     _log_base "DEBUG" "$1";
 } # END log_debug
 
+# --- _log_marker ---
+# Internal helper to write markers, ensuring they are written even if logging is disabled initially
+_log_marker() {
+    local marker_text="$1"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    # Use printf to stderr if LOG_FILE is /dev/null or empty during early stages
+    if [[ "$LOG_FILE" == "/dev/null" || -z "$LOG_FILE" ]]; then # Use double brackets and check for empty
+        # Also check for empty LOG_FILE as it might not be set to /dev/null
+        printf "%s - %s - MARKER: %s\n" "$timestamp" "$$" "$marker_text" >&2
+    else
+        echo "$timestamp - $$ - MARKER: $marker_text" >> "$LOG_FILE"
+    fi
+}
+
 # --- Helper and Finalization Functions ---
 
 # Function: _sa_cleanup
@@ -756,144 +771,69 @@ sa_setup() {
 
     log_debug "sa_setup: Main setup function invoked."
 
-    # Argument Parsing for sourced script
-    # Check for verbose flag first
-    if [ "$#" -ge 1 ] && [[ "$1" == "-v" || "$1" == "--verbose" ]]; then
-        _sa_IS_VERBOSE="true"
-        # Logging might not be fully set up yet, but attempt debug log
-        log_debug "sa_setup: Verbose logging enabled by argument."
-        shift # Remove the verbose flag from arguments
-    fi
+    # --- Log Script Start --- 
+    # Must be called *after* logging functions are defined and LOG_FILE is potentially set.
+    _log_marker "_______<=:START:=> SSH Agent Setup Script______"
 
-    # Agent setup must happen regardless of other args
+    # --- Argument Parsing ---
+    local key_list_source_file=""
+    # Process arguments manually (safer for sourcing)
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -v|--verbose)
+                _sa_IS_VERBOSE="true"
+                log_debug "Verbose logging enabled by argument."
+                shift # Consume the argument
+                ;;
+            -*)
+                log_warn "Unknown option ignored: $arg"
+                shift # Consume the argument
+                ;;
+            *)
+                # Assume the first non-option argument is the key list file
+                if [ -z "$key_list_source_file" ]; then
+                    key_list_source_file="$arg"
+                    log_info "Key list source file specified: $key_list_source_file"
+                else
+                    log_warn "Ignoring additional argument: $arg"
+                fi
+                shift # Consume the argument
+                ;;
+        esac
+    done
+
+    # --- Agent Check / Start ---
+    log_info "Checking/starting SSH agent..."
     if ! _sa_ensure_ssh_agent; then
-        log_error "sa_setup: Failed to ensure SSH agent is running."
-        _sa_log_execution_time # Log time even on failure
+        log_error "Failed to ensure SSH agent is running. Aborting setup."
         set +u # Disable strict mode before returning
-        return 1 # Return failure from this function
+        _log_marker "_______<=:EXIT:=> SSH Agent Setup Script (Agent Ensure Failed)______"
+        return 1
     fi
-    log_debug "sa_setup: Agent setup complete."
+    log_info "SSH Agent is running and sourced (PID: ${SSH_AGENT_PID:-Unknown})."
 
-    # --- Load keys ---
-    local LOAD_METHOD="scan" # Default: Scan SSH directory
-    local KEY_SOURCE_FILE=""
-
-    # Check if a filename argument remains *after* potential verbose flag shift
-    if [ "$#" -ge 1 ] && [ -n "$1" ]; then
-        log_debug "sa_setup: Remaining argument provided: $1. Treating as key list file."
-        # Basic validation: Check if the provided argument is a readable file
-        if [ -f "$1" ] && [ -r "$1" ]; then
-            log_info "sa_setup: Using provided file '$1' as source for key names."
-            LOAD_METHOD="file"
-            KEY_SOURCE_FILE="$1"
-        else
-            log_warn "sa_setup: Argument '$1' is not a readable file. Falling back to scanning $SSH_DIR."
-            # Keep LOAD_METHOD="scan"
+    # --- Key Loading Logic ---
+    if [ -n "$key_list_source_file" ]; then
+        # Load keys from the specified file
+        log_info "Loading keys from specified file: $key_list_source_file"
+        if ! _sa_write_valid_key_basenames_to_file "$key_list_source_file"; then
+            log_warn "Loading keys from file '$key_list_source_file' encountered issues."
         fi
     else
-        log_debug "sa_setup: No filename argument provided. Scanning $SSH_DIR for keys."
-        # Keep LOAD_METHOD="scan"
-    fi
-
-    # Populate the VALID_KEY_LIST_FILE based on the load method
-    log_debug "sa_setup: Populating key list using method: $LOAD_METHOD"
-    if [ "$LOAD_METHOD" = "file" ]; then
-        # Copy contents from the source file, ensuring the list file is clear first
-        if ! touch "$VALID_KEY_LIST_FILE" 2>/dev/null; then
-             log_error "sa_setup: Cannot create or touch key list file '$VALID_KEY_LIST_FILE'. Check permissions."
-             # Attempt to continue without loading keys
-             VALID_KEY_LIST_FILE=""
-        else
-            chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "sa_setup: Could not set permissions on $VALID_KEY_LIST_FILE"
-            # Clear the list file first
-            log_debug "sa_setup: Clearing key list file: $VALID_KEY_LIST_FILE"
-            if command -v truncate > /dev/null; then
-                truncate -s 0 "$VALID_KEY_LIST_FILE"
-            else
-                echo -n > "$VALID_KEY_LIST_FILE"
-            fi
-            if [ $? -ne 0 ]; then
-                 log_error "sa_setup: Failed to clear key list file '$VALID_KEY_LIST_FILE'. Cannot load keys from file."
-                 VALID_KEY_LIST_FILE=""
-            else
-                 # Copy lines, skipping empty lines and comments
-                 log_debug "sa_setup: Copying key names from '$KEY_SOURCE_FILE' to '$VALID_KEY_LIST_FILE'"
-                 grep -vE '^\s*(#|$)' "$KEY_SOURCE_FILE" >> "$VALID_KEY_LIST_FILE"
-                 local copy_status=$?
-                 if [ $copy_status -ne 0 ] && [ $copy_status -ne 1 ]; then # grep returns 1 if no lines selected
-                      log_error "sa_setup: Failed to read from source key file '$KEY_SOURCE_FILE' (grep status: $copy_status)."
-                      VALID_KEY_LIST_FILE="" # Mark as unusable
-                 fi
-            fi
-        fi
-    else # LOAD_METHOD is "scan"
-        # Use the existing function to scan the SSH directory
-        # NOTE: Using the function that *writes* to the file, not the one that echoes
-        log_debug "sa_setup: Calling _sa_write_valid_key_basenames_to_file to scan $SSH_DIR and populate '$VALID_KEY_LIST_FILE'..."
+        # Scan SSH_DIR and load keys
+        log_info "Scanning $SSH_DIR for keys to load..."
         if ! _sa_write_valid_key_basenames_to_file "$VALID_KEY_LIST_FILE"; then
-            # No valid keys found by scanning, or error occurred writing file
-            log_info "sa_setup: No valid key files found in $SSH_DIR or update failed."
-            VALID_KEY_LIST_FILE="" # Mark as unusable
+            log_warn "Scanning and loading keys from directory '$SSH_DIR' encountered issues."
         fi
     fi
 
-    # Attempt to add keys from the populated list file (if usable)
-    # Also check if the number of keys in the agent matches the list to avoid redundant loads.
-    if [ -n "$VALID_KEY_LIST_FILE" ] && [ -f "$VALID_KEY_LIST_FILE" ] && [ -s "$VALID_KEY_LIST_FILE" ]; then
-        log_debug "sa_setup: Valid key list file found: $VALID_KEY_LIST_FILE. Checking agent key count..."
-
-        local agent_key_count=-1 # Default to -1 to indicate check hasn't run or failed
-        local file_key_count=0
-
-        # Get agent key count robustly using ssh-add -l (lists fingerprints)
-        ssh-add -l >/dev/null 2>&1
-        local agent_status=$?
-        if [ $agent_status -eq 0 ]; then
-            # Agent has keys
-            agent_key_count=$(ssh-add -l | wc -l)
-            log_debug "sa_setup: Keys currently in agent: $agent_key_count"
-        elif [ $agent_status -eq 1 ]; then
-            # Agent is running but has no keys
-            agent_key_count=0
-            log_debug "sa_setup: Agent has no keys currently loaded."
-        else
-            # Status 2 or higher: Error communicating with agent
-            log_warn "sa_setup: Could not communicate with agent (ssh-add -l status $agent_status) to check key count. Will attempt to add keys."
-            # Keep agent_key_count=-1 to force reload attempt
-        fi
-
-        # Get file key count (use cat to avoid error if file is empty, though -s check should prevent this)
-        file_key_count=$(cat "$VALID_KEY_LIST_FILE" | wc -l | awk '{print $1}')
-        log_debug "sa_setup: Keys found in list file '$VALID_KEY_LIST_FILE': $file_key_count"
-
-        # Compare counts if agent communication was successful (agent_key_count >= 0)
-        if [ "$agent_key_count" -ge 0 ] && [ "$agent_key_count" -eq "$file_key_count" ]; then
-            log_info "sa_setup: Agent key count ($agent_key_count) matches list file count ($file_key_count). Skipping redundant key loading."
-        else
-            # Counts differ or agent communication failed, attempt to add keys
-            if [ "$agent_key_count" -lt 0 ]; then
-                log_debug "sa_setup: Agent communication failed, proceeding with key add attempt."
-            else
-                log_info "sa_setup: Agent key count ($agent_key_count) differs from list file count ($file_key_count). Attempting to add keys..."
-            fi
-
-            log_debug "sa_setup: Calling _sa_add_keys_to_agent using list file '$VALID_KEY_LIST_FILE'..."
-            if ! _sa_add_keys_to_agent; then
-                log_warn "sa_setup: _sa_add_keys_to_agent reported failure or no keys added."
-                # This might be okay (e.g., all keys need passphrase), or might indicate issues.
-            fi
-        fi
-    else
-         log_warn "sa_setup: Key list file '$VALID_KEY_LIST_FILE' is not available or empty. Skipping key loading."
-    fi
-
-    # Log execution time before returning
-    _sa_log_execution_time
-
-    log_debug "sa_setup: Reached end of main setup function. Final return 0 coming up."
-    log_debug "sa_setup: Setup complete."
+    # --- Finalization ---
+    log_debug "SSH agent setup process completed."
+    _sa_log_execution_time # Log execution time
     set +u # Disable strict mode before returning
-    return 0 # Indicate success from setup function
+    _log_marker "_______<=:EXIT:=> SSH Agent Setup Script (Agent Ensure Success)______"
+    return 0
 } # END sa_setup
 
 # --- Auto-Execution Trigger ---
