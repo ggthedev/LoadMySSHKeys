@@ -1922,7 +1922,10 @@ _script_exit_handler() {
 #             run_interactive_menu. External commands: mktemp, printf.
 # ---
 main() {
-    # --- Setup Logging FIRST --- 
+    local parse_error=0 # Initialize parse_error to handle unbound variable with set -u
+    local FIRST_ACTION_SET=0 # Initialize flag for simple parser action tracking
+
+    # --- Setup Logging FIRST ---
     if ! setup_logging; then
         printf "Warning: Logging setup failed. Continuing with logging disabled.\n" >&2
     fi
@@ -1976,7 +1979,8 @@ main() {
     else
         # --- Use Simple Parsing Fallback --- (GNU getopt not found or check failed)
         # _check_gnu_getopt already logged the error
-        printf "Warning: GNU getopt not found or incompatible. Using simple parser.\n         Combined/long options unsupported. Install GNU getopt (e.g., 'brew install gnu-getopt' on macOS).\n" >&2
+        # Log this as info, as fallback works but lacks features. Avoids user-facing warning.
+        log_info "GNU getopt not found or incompatible. Using simple parser. Combined/long options unsupported. Recommendation: Install GNU getopt (e.g., 'brew install gnu-getopt' on macOS) for full argument support."
 
         local args_copy=("$@")
         local i=0
