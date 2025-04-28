@@ -135,7 +135,8 @@ _check_gnu_getopt() {
     fi
 
     # If we reach here, no compatible getopt was found
-    log_error "GNU getopt not found. Please install it (e.g., 'brew install gnu-getopt') and ensure it's in your PATH or linked correctly."
+    # Log as info, as script can fall back to simple parser
+    log_info "GNU getopt not found or incompatible. Simple parser will be used. Recommendation: Install GNU getopt for full argument support (e.g., 'brew install gnu-getopt')."
     return 1
 }
 
