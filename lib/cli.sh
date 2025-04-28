@@ -269,77 +269,37 @@ parse_args() {
 # They typically perform validation, ensure the agent is running (if needed),
 # call the appropriate core logic function from another library, and then exit.
 
-# --- _perform_list_keys_check (Helper for run_list_keys) ---
-#
-# @description Internal helper to check for a running agent (current env or
-#              sourced from $AGENT_ENV_FILE) and then call `list_current_keys`
-#              if an agent is found. Provides context-specific hints if no agent is found.
-# @arg        None
-# @return     Exit status of `list_current_keys` if an agent is found.
-# @return     1 If no usable agent is found.
-# @prints     Messages indicating agent status or "No agent found" hints to stdout/stderr.
-# @stdout     Output from `list_current_keys` or "No agent" message.
-# @stderr     Output from `list_current_keys` or "No agent" message hint.
-# @depends    Global variable: AGENT_ENV_FILE. Functions: check_ssh_agent,
-#             list_current_keys, log_debug, log_info. External command: basename.
-# ---
-_perform_list_keys_check() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    local agent_found_list_check=0 # Flag to track if a usable agent was found.
-
-    # Check 1: Current env first
-    log_debug "_perform_list_keys_check: Checking current env..."
-    if check_ssh_agent; then
-        agent_found_list_check=1
-    # If not in env, check file
-    elif [ -f "$AGENT_ENV_FILE" ]; then
-        log_debug "_perform_list_keys_check: Sourcing $AGENT_ENV_FILE..."
-        # Source into current scope for potential use by list_current_keys
-        # shellcheck disable=SC1090
-        . "$AGENT_ENV_FILE" >/dev/null
-        if check_ssh_agent; then
-             log_info "_perform_list_keys_check: Found valid agent via sourced file."
-             agent_found_list_check=1
-        else
-            log_debug "_perform_list_keys_check: Agent invalid after sourcing file."
-        fi
-    else
-         log_debug "_perform_list_keys_check: Agent not in env and no agent file found."
-    fi
-
-    if [ "$agent_found_list_check" -eq 1 ]; then
-        log_info "_perform_list_keys_check: Agent found, calling list_current_keys."
-        # Call the actual listing function, which handles its own errors/output
-        list_current_keys
-        return $? # Return status of list_current_keys
-    else
-        log_info "_perform_list_keys_check: No usable agent found."
-        printf "No running SSH agent found to list keys from.\\n"
-        # For CLI context (-l), add hint
-        printf "Hint: Ensure agent is running or start the menu with '%s --menu'\\n" "$(basename "$0")" >&2
-        return 1 # Indicate failure to list keys due to no agent
-    fi
-}
-
 # --- run_list_keys ---
 #
 # @description Handler for the `-l` or `--list` CLI option.
-#              Validates the SSH directory and calls the internal helper
-#              `_perform_list_keys_check` to find an agent and list keys.
-#              Exits with the status code returned by the helper.
+#              Validates the SSH directory, ensures the dedicated agent is running
+#              using ensure_ssh_agent, then calls list_current_keys.
+#              Exits with the status code of list_current_keys or 1 if agent setup fails.
 # @arg        None
-# @exits      With status 0 or 1 based on the outcome of `_perform_list_keys_check`.
-# @depends    Functions: validate_ssh_dir, _perform_list_keys_check, log_info, log_debug.
+# @exits      With status 0 or 1 based on validation, agent setup, or the outcome
+#             of `list_current_keys`.
+# @depends    Functions: validate_ssh_dir, ensure_ssh_agent, list_current_keys,
+#             log_info, log_debug.
 # ---
 run_list_keys() {
     log_info "CLI Action: Listing keys (--list)..."
     log_debug "Entering function: ${FUNCNAME[0]}"
-    log_debug "run_list_keys: Validating SSH dir..."
+
+    log_debug "Validating SSH dir..."
     if ! validate_ssh_dir; then exit 1; fi
 
-    # Call the consolidated check/list function
-    _perform_list_keys_check
-    exit $? # Exit with the status returned by the helper function
+    log_debug "Ensuring agent is running..."
+    if ! ensure_ssh_agent; then
+        log_error "Failed to ensure SSH agent is running. Cannot list keys."
+        # ensure_ssh_agent prints detailed errors
+        printf "Error: Agent not available. Cannot list keys.\n" >&2
+        exit 1
+    fi
+
+    # Agent is confirmed running and environment variables are set.
+    log_debug "Agent confirmed. Calling list_current_keys..."
+    list_current_keys
+    exit $? # Exit with the status returned by list_current_keys
 }
 
 # --- run_load_keys ---

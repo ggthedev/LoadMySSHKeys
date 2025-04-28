@@ -2,13 +2,11 @@
 # ==============================================================================
 # Library: agent.sh
 # Description: Provides functions for managing the SSH agent process.
-#              Includes checking agent status, ensuring an agent is running
-#              (starting one if necessary), and persisting agent environment
-#              variables to a file.
+#              Ensures a *dedicated* agent (tracked via AGENT_ENV_FILE) is
+#              running and its environment variables are loaded.
 # Dependencies: Relies on functions from lib/logging.sh (log_debug, log_info,
 #               log_error, log_warn).
-#               Relies on global variables SSH_AUTH_SOCK, SSH_AGENT_PID,
-#               AGENT_ENV_FILE, HOME set by the main script.
+#               Relies on global variables AGENT_ENV_FILE, HOME set by the main script.
 # ==============================================================================
 
 # --- Safety Check ---
@@ -22,112 +20,66 @@ fi
 # --- SSH Agent Management Functions ---
 # ==============================================================================
 
-# --- check_ssh_agent ---
+# --- _is_agent_live ---
 #
-# @description Performs basic checks to determine if an SSH agent communication
-#              socket, specified by the SSH_AUTH_SOCK environment variable, exists.
-#              This is a lightweight check and does not verify if the agent process
-#              itself is still running or responsive.
-#              NOTE: The check for PID was removed to simplify; relying on socket presence
-#                    and actual `ssh-add` commands to fail if agent is unresponsive.
-#              NOTE: Added check for regular file (`-f`) for compatibility with mock agent used in tests.
-# @arg        None
-# @uses       Global environment variable: SSH_AUTH_SOCK.
-# @return     0 If SSH_AUTH_SOCK is set and the path points to an existing
-#               socket (`-S`) or regular file (`-f` for test mocks).
-# @return     1 If SSH_AUTH_SOCK is not set or the file/socket does not exist.
-# @stdout     None
-# @stderr     None (status logged via log_debug).
-# @depends    Function: log_debug.
+# @description Checks if an SSH agent, identified by its PID and socket path,
+#              appears to be running and accessible.
+# @arg $1 String The SSH_AGENT_PID to check.
+# @arg $2 String The SSH_AUTH_SOCK path to check.
+# @return 0 If the PID is running (kill -0 succeeds) AND the socket file exists.
+# @return 1 If either the PID is not running or the socket file does not exist.
+# @stdout None
+# @stderr None (status logged via log_debug).
+# @depends Function: log_debug. External command: kill.
 # ---
-check_ssh_agent() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    log_debug "Checking agent status... (SOCK='${SSH_AUTH_SOCK:-Not Set}')"
+_is_agent_live() {
+    local pid="$1"
+    local sock="$2"
+    log_debug "_is_agent_live: Checking PID='$pid', SOCK='$sock'"
 
-    # Check if the SSH_AUTH_SOCK environment variable is set and non-empty.
-    if [ -z "${SSH_AUTH_SOCK:-}" ]; then
-        log_debug "check_ssh_agent: Required SSH_AUTH_SOCK environment variable not set."
-        return 1 # Failure: Variable not set.
+    if [ -z "$pid" ] || [ -z "$sock" ]; then
+        log_debug "_is_agent_live: Missing PID or SOCK argument."
+        return 1
     fi
 
-    # Check if the path specified by SSH_AUTH_SOCK exists.
-    # It should typically be a socket (-S), but we also allow a regular file (-f)
-    # for compatibility with the mock agent used in the BATS tests.
-    if [ ! -f "$SSH_AUTH_SOCK" ] && [ ! -S "$SSH_AUTH_SOCK" ]; then
-        log_debug "check_ssh_agent: Agent communication file ('$SSH_AUTH_SOCK') not found or is not a regular file/socket."
-        return 1 # Failure: Socket/File does not exist.
+    # 1. Check if the process with the given PID is running.
+    #    `kill -0 $pid` sends signal 0, which checks process existence without killing it.
+    #    Redirect stderr to suppress "No such process" messages.
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+        log_debug "_is_agent_live: Agent process PID '$pid' is not running."
+        return 1
     fi
 
-    # If the variable is set and the file/socket exists, assume it *might* be usable.
-    # Further checks (like `ssh-add -l`) are needed to confirm responsiveness.
-    log_debug "check_ssh_agent: Agent communication file/socket exists. Assuming agent *might* be running."
-    return 0 # Success: Basic check passed.
+    # 2. Check if the socket file exists.
+    #    Allow regular file (-f) for test mocks, otherwise check for socket (-S).
+    if [ ! -S "$sock" ] && [ ! -f "$sock" ]; then
+        log_debug "_is_agent_live: Agent socket '$sock' does not exist or is not a socket/file."
+        return 1
+    fi
+
+    log_debug "_is_agent_live: Agent PID '$pid' is running and socket '$sock' exists."
+    return 0 # Both checks passed.
 }
 
-
-# --- ensure_ssh_agent ---
+# --- _start_new_agent ---
 #
-# @description Ensures that a usable SSH agent is running and its environment
-#              variables (SSH_AUTH_SOCK, SSH_AGENT_PID) are exported in the
-#              current shell session.
-#              1. Checks if variables are already set and the agent is running.
-#              2. If not, attempts to source variables from a persistent file ($AGENT_ENV_FILE).
-#              3. If still not running, starts a new `ssh-agent`, exports its variables,
-#                 and saves them to the persistent file.
-# @arg        None
-# @uses       Global variables: SSH_AUTH_SOCK, SSH_AGENT_PID, AGENT_ENV_FILE, HOME.
-# @modifies   Exports SSH_AUTH_SOCK and SSH_AGENT_PID environment variables.
-# @modifies   Creates or overwrites the $AGENT_ENV_FILE.
-# @modifies   Creates $HOME/.ssh directory if it doesn't exist.
-# @return     0 If an agent is confirmed running (either pre-existing or newly started).
-# @return     1 If starting a new agent fails or verification fails.
-# @prints     Status messages to stdout indicating agent status or actions taken.
-# @stdout     Informational messages (agent running, connected, started).
-# @stderr     Error messages if agent start/verification fails.
-# @depends    Functions: check_ssh_agent, log_debug, log_info, log_error, log_warn.
-#             External commands: ssh-agent, mkdir, chmod, echo, grep, cut (or parameter expansion), dirname, rm, sleep.
+# @description Starts a new ssh-agent, parses its output, exports the variables,
+#              and saves them to the persistent file $AGENT_ENV_FILE.
+# @arg None
+# @uses Global variable AGENT_ENV_FILE, HOME.
+# @modifies Exports SSH_AUTH_SOCK and SSH_AGENT_PID environment variables.
+# @modifies Creates or overwrites the $AGENT_ENV_FILE with 600 permissions.
+# @modifies Creates $HOME/.ssh directory if it doesn't exist.
+# @return 0 If agent starts successfully, variables are exported, and file is saved.
+# @return 1 If starting agent, parsing output, or saving file fails.
+# @prints Status messages to stdout/stderr.
+# @stdout Message indicating agent start.
+# @stderr Error messages on failure.
+# @depends Functions: log_debug, log_info, log_error, log_warn.
+#             External commands: ssh-agent, mkdir, chmod, echo, grep, sed (or parameter expansion), dirname, date.
 # ---
-ensure_ssh_agent() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    log_info "Ensuring SSH agent is active..."
-
-    # 1. Check if agent appears to be running in the current environment.
-    #    Uses the lightweight check_ssh_agent function.
-    if [ -n "${SSH_AUTH_SOCK:-}" ] && check_ssh_agent; then
-        # Agent variables are set and the socket/file exists.
-        log_info "Agent already running and sourced (SOCK: ${SSH_AUTH_SOCK:-Unknown}, PID: ${SSH_AGENT_PID:-Unknown})."
-        printf "SSH agent is already running (Socket: %s).\n" "${SSH_AUTH_SOCK:-Unknown}"
-        # Ensure variables are exported for subsequent commands in the same script execution.
-        # This might be redundant if they were already exported, but ensures consistency.
-        export SSH_AUTH_SOCK SSH_AGENT_PID
-        return 0 # Success: Agent already running.
-    fi
-
-    # 2. If not running in current env, try sourcing from the persistent file.
-    log_debug "Agent not running or sourced in current environment. Checking persistent file: $AGENT_ENV_FILE"
-    if [ -f "$AGENT_ENV_FILE" ]; then
-        log_debug "Sourcing persistent agent file: $AGENT_ENV_FILE"
-        # Source the file. Use '.' for POSIX compliance. Redirect output to suppress echoes.
-        # shellcheck disable=SC1090 # ShellCheck cannot follow the dynamic path.
-        . "$AGENT_ENV_FILE" >/dev/null
-        # Re-check if the agent is valid after sourcing.
-        if check_ssh_agent; then
-            log_info "Sourced persistent file. Reusing agent (SOCK: ${SSH_AUTH_SOCK:-Unknown}, PID: ${SSH_AGENT_PID:-Unknown})."
-            printf "Successfully connected to existing ssh-agent (Socket: %s).\n" "${SSH_AUTH_SOCK:-Unknown}"
-            # Ensure variables are exported after sourcing.
-            export SSH_AUTH_SOCK SSH_AGENT_PID
-            return 0 # Success: Reconnected via file.
-        else
-            # If the sourced file exists but the agent is not valid (e.g., stale process),
-            # remove the stale file and unset the potentially invalid variables.
-            log_warn "Agent file '$AGENT_ENV_FILE' found but agent invalid after sourcing (stale?). Removing stale file."
-            rm -f "$AGENT_ENV_FILE"
-            unset SSH_AUTH_SOCK SSH_AGENT_PID
-        fi
-    fi
-
-    # 3. If no valid agent found yet, start a new one.
-    log_info "No valid existing agent found. Starting new ssh-agent..."
+_start_new_agent() {
+    log_info "Starting new ssh-agent..."
     printf "Starting new ssh-agent...\n"
 
     # Ensure the ~/.ssh directory exists, as ssh-agent might need it.
@@ -140,47 +92,41 @@ ensure_ssh_agent() {
 
     # Execute ssh-agent in evaluation mode (-s) to get export commands.
     local agent_output
-    if ! agent_output=$(ssh-agent -s); then
-        log_error "Failed to execute ssh-agent -s. Cannot start agent."
+    # Temporarily disable exit-on-error for the agent command itself
+    set +e
+    agent_output=$(ssh-agent -s)
+    local agent_status=$?
+    set -e # Re-enable exit on error
+
+    if [ $agent_status -ne 0 ]; then
+        log_error "Failed to execute ssh-agent -s (Status: $agent_status). Cannot start agent."
         return 1 # Failure: ssh-agent command failed.
     fi
     log_debug "ssh-agent -s output captured."
 
     # --- Parse ssh-agent output --- 
-    # Avoid using `eval` for security. Parse the output manually.
-    # Example Output:
-    # SSH_AUTH_SOCK=/tmp/ssh-XXXXXXabcdef/agent.12345; export SSH_AUTH_SOCK;
-    # SSH_AGENT_PID=12346; export SSH_AGENT_PID;
-    # echo Agent pid 12346;
-    local ssh_auth_sock ssh_agent_pid
+    local parsed_agent_sock parsed_agent_pid
     local sock_line pid_line temp_sock temp_pid
 
-    # Extract lines containing the variables.
+    # Use parameter expansion for safer parsing
     sock_line=$(echo "$agent_output" | grep '^SSH_AUTH_SOCK=')
     pid_line=$(echo "$agent_output" | grep '^SSH_AGENT_PID=')
 
-    # Extract SSH_AUTH_SOCK value: Remove prefix and suffix.
-    # Handles potentially quoted paths.
-    temp_sock="${sock_line#SSH_AUTH_SOCK=}" # Remove prefix 'SSH_AUTH_SOCK='
-    ssh_auth_sock="${temp_sock%%;*}"      # Remove the first semicolon and everything after it
-    # Remove potential quotes if present (e.g., if path had spaces, though unlikely for sockets)
-    ssh_auth_sock="${ssh_auth_sock#\'}" # Remove leading quote
-    ssh_auth_sock="${ssh_auth_sock%\'}" # Remove trailing quote
+    temp_sock="${sock_line#SSH_AUTH_SOCK=}" ; parsed_agent_sock="${temp_sock%%;*}"
+    parsed_agent_sock="${parsed_agent_sock#\'}" ; parsed_agent_sock="${parsed_agent_sock%\'}"
 
-    # Extract SSH_AGENT_PID value: Remove prefix and suffix.
-    temp_pid="${pid_line#SSH_AGENT_PID=}" # Remove prefix 'SSH_AGENT_PID='
-    ssh_agent_pid="${temp_pid%%;*}"     # Remove the first semicolon and everything after it
+    temp_pid="${pid_line#SSH_AGENT_PID=}" ; parsed_agent_pid="${temp_pid%%;*}"
 
     # --- Export Parsed Variables --- 
-    if [ -n "$ssh_auth_sock" ] && [ -n "$ssh_agent_pid" ]; then
-        # If parsing succeeded, export the variables for the current shell.
-        export SSH_AUTH_SOCK="$ssh_auth_sock"
-        export SSH_AGENT_PID="$ssh_agent_pid"
+    if [ -n "$parsed_agent_sock" ] && [ -n "$parsed_agent_pid" ]; then
+        export SSH_AUTH_SOCK="$parsed_agent_sock"
+        export SSH_AGENT_PID="$parsed_agent_pid"
         log_info "Extracted and exported new agent details: SOCK=$SSH_AUTH_SOCK PID=$SSH_AGENT_PID"
     else
-        # If parsing failed, log error and exit.
         log_error "Failed to parse SSH_AUTH_SOCK or SSH_AGENT_PID from ssh-agent output."
         log_debug "ssh-agent output was: $agent_output"
+        # Unset potentially partially set vars
+        unset SSH_AUTH_SOCK SSH_AGENT_PID
         return 1 # Failure: Parsing failed.
     fi
 
@@ -188,41 +134,128 @@ ensure_ssh_agent() {
     log_debug "Saving agent environment to persistent file: $AGENT_ENV_FILE"
     local agent_env_dir
     agent_env_dir=$(dirname "$AGENT_ENV_FILE") # Get the directory part of the path.
-    # Create the directory if it doesn't exist.
     if ! mkdir -p "$agent_env_dir"; then
-        log_warn "Could not create directory '$agent_env_dir' for agent environment file. Agent persistence will be disabled for this session."
-    else
-        # Write the export commands to the persistent file.
-        # Quoting SSH_AUTH_SOCK is good practice, although socket paths rarely contain spaces.
-        {
-            echo "SSH_AUTH_SOCK='$SSH_AUTH_SOCK'; export SSH_AUTH_SOCK;"
-            echo "SSH_AGENT_PID=$SSH_AGENT_PID; export SSH_AGENT_PID;"
-            echo "# Agent details saved on $(date)" # Add a timestamp comment.
-        } > "$AGENT_ENV_FILE"
-        # Set permissions on the environment file (owner read/write only).
-        chmod 600 "$AGENT_ENV_FILE" || log_warn "Failed to set permissions (600) on $AGENT_ENV_FILE"
-        log_info "Agent environment saved to $AGENT_ENV_FILE."
+        log_error "Could not create directory '$agent_env_dir' for agent environment file '$AGENT_ENV_FILE'. Cannot persist agent."
+        # Agent is running, but persistence failed. Return success but log error.
+        return 0 # Still usable for this session, but log the error.
     fi
 
-    # --- Final Verification ---
-    # Give the agent a very brief moment to fully initialize (may not be necessary).
-    sleep 0.5
-    # Perform the basic check again on the newly started agent.
-    if check_ssh_agent; then
-        log_info "New agent started and verified successfully (PID: ${SSH_AGENT_PID:-Unknown})."
-        printf "Successfully started new ssh-agent (PID: %s).\n" "$SSH_AGENT_PID"
-        return 0 # Success: New agent started and verified.
+    # Write the export commands to the persistent file.
+    # Quoting SSH_AUTH_SOCK is good practice.
+    if ! {
+        echo "# SSH Key Manager Agent Environment"
+        echo "# Saved on $(date)"
+        echo "SSH_AUTH_SOCK='$SSH_AUTH_SOCK'; export SSH_AUTH_SOCK;"
+        echo "SSH_AGENT_PID=$SSH_AGENT_PID; export SSH_AGENT_PID;"
+    } > "$AGENT_ENV_FILE"; then
+        log_error "Failed to write agent environment to '$AGENT_ENV_FILE'. Check permissions."
+        # Agent is running, but persistence failed. Return success but log error.
+        return 0 # Still usable for this session, but log the error.
+    fi
+
+    # Set permissions on the environment file (owner read/write only).
+    chmod 600 "$AGENT_ENV_FILE" || log_warn "Failed to set permissions (600) on $AGENT_ENV_FILE"
+    log_info "Agent environment saved to $AGENT_ENV_FILE."
+
+    printf "Successfully started new ssh-agent (PID: %s).\n" "$SSH_AGENT_PID"
+    return 0 # Success: New agent started and saved.
+}
+
+# --- ensure_ssh_agent ---
+#
+# @description Ensures that a usable SSH agent, managed via $AGENT_ENV_FILE,
+#              is running and its environment variables are exported.
+#              1. Checks if variables are set in current env AND agent is live.
+#              2. If not, attempts to load from $AGENT_ENV_FILE and validate.
+#              3. If file invalid/stale or doesn't exist, starts a new agent
+#                 and saves its details to $AGENT_ENV_FILE.
+# @arg        None
+# @uses       Global variables: AGENT_ENV_FILE.
+# @modifies   Exports SSH_AUTH_SOCK and SSH_AGENT_PID environment variables.
+# @modifies   May create or overwrite $AGENT_ENV_FILE.
+# @return     0 If an agent is confirmed running and variables exported.
+# @return     1 If validating or starting an agent fails.
+# @prints     Status messages to stdout/stderr.
+# @stdout     Informational messages (agent running, connected, started).
+# @stderr     Error messages if agent validation/start fails.
+# @depends    Functions: _is_agent_live, _start_new_agent, log_debug, log_info, log_error, log_warn.
+#             External commands: rm, echo, grep, sed (or parameter expansion).
+# ---
+ensure_ssh_agent() {
+    log_debug "Entering function: ${FUNCNAME[0]}"
+    log_info "Ensuring dedicated SSH agent (via $AGENT_ENV_FILE) is active..."
+
+    # 1. Check if agent appears live based on CURRENT environment variables.
+    #    This handles the case where the script is run multiple times in the same
+    #    shell where a previous invocation already exported the variables.
+    if [ -n "${SSH_AGENT_PID:-}" ] && [ -n "${SSH_AUTH_SOCK:-}" ]; then
+        log_debug "Found agent vars in current env (PID: $SSH_AGENT_PID, SOCK: $SSH_AUTH_SOCK). Validating liveness..."
+        if _is_agent_live "$SSH_AGENT_PID" "$SSH_AUTH_SOCK"; then
+            log_info "Agent from current environment is live and ready."
+            printf "SSH agent is already running (PID: %s, Socket: %s).\n" "$SSH_AGENT_PID" "$SSH_AUTH_SOCK"
+            # Ensure they are exported just in case
+            export SSH_AUTH_SOCK SSH_AGENT_PID
+            return 0 # Success: Agent from env is live.
+        else
+            log_info "Agent vars found in current env, but agent is not live (PID: $SSH_AGENT_PID, SOCK: $SSH_AUTH_SOCK). Will check/update file."
+            # Unset stale vars from env before proceeding
+            unset SSH_AUTH_SOCK SSH_AGENT_PID
+        fi
+    fi
+
+    # 2. If not live in current env, check the persistent file.
+    log_debug "Checking persistent agent file: $AGENT_ENV_FILE"
+    if [ -f "$AGENT_ENV_FILE" ]; then
+        log_debug "Persistent file exists. Parsing and validating..."
+        local file_agent_sock file_agent_pid
+
+        # Parse variables directly from the file without fully sourcing
+        # Use grep and parameter expansion for safety
+        local sock_line pid_line temp_sock temp_pid
+        sock_line=$(grep '^SSH_AUTH_SOCK=' "$AGENT_ENV_FILE")
+        pid_line=$(grep '^SSH_AGENT_PID=' "$AGENT_ENV_FILE")
+
+        temp_sock="${sock_line#SSH_AUTH_SOCK=}" ; file_agent_sock="${temp_sock%%;*}"
+        file_agent_sock="${file_agent_sock#\'}" ; file_agent_sock="${file_agent_sock%\'}"
+
+        temp_pid="${pid_line#SSH_AGENT_PID=}" ; file_agent_pid="${temp_pid%%;*}"
+
+        log_debug "Parsed from file: PID='$file_agent_pid', SOCK='$file_agent_sock'"
+
+        # Validate the agent details found in the file
+        if [ -n "$file_agent_pid" ] && [ -n "$file_agent_sock" ] && _is_agent_live "$file_agent_pid" "$file_agent_sock"; then
+            # Agent from file is live! Export vars and return.
+            log_info "Agent details from file '$AGENT_ENV_FILE' are valid and agent is live."
+            printf "Successfully connected to existing ssh-agent (PID: %s, Socket: %s).\n" "$file_agent_pid" "$file_agent_sock"
+            export SSH_AUTH_SOCK="$file_agent_sock"
+            export SSH_AGENT_PID="$file_agent_pid"
+            return 0 # Success: Reconnected via file.
+        else
+            log_warn "Agent details in '$AGENT_ENV_FILE' are invalid or agent is not live (PID: '$file_agent_pid', SOCK: '$file_agent_sock'). Removing stale file."
+            rm -f "$AGENT_ENV_FILE" 2>/dev/null || log_warn "Failed to remove stale agent file: $AGENT_ENV_FILE"
+            # Ensure vars are unset if they came from the stale file
+            unset SSH_AUTH_SOCK SSH_AGENT_PID
+        fi
     else
-        # This should be rare if ssh-agent -s succeeded, but handle defensively.
-        log_error "Started new agent but failed final verification check!"
-        printf "Error: Started ssh-agent but failed final verification.\n" >&2
-        # Clean up by unsetting vars and removing the potentially bad env file.
-        unset SSH_AUTH_SOCK SSH_AGENT_PID
-        rm -f "$AGENT_ENV_FILE" 2>/dev/null
-        return 1 # Failure: Verification failed.
+         log_info "Persistent agent file '$AGENT_ENV_FILE' not found."
+    fi
+
+    # 3. If no valid agent found yet (env or file), start a new one.
+    if _start_new_agent; then
+        # _start_new_agent already exported vars and saved file
+        log_info "New agent started and environment configured successfully."
+        return 0 # Success: New agent started.
+    else
+        log_error "Failed to start and configure a new SSH agent."
+        printf "Error: Failed to start or configure ssh-agent.\n" >&2
+        return 1 # Failure: Could not start agent.
     fi
 
 } # END ensure_ssh_agent
+
+# --- check_ssh_agent --- (Deprecated / Removed)
+# The logic is now integrated into _is_agent_live and ensure_ssh_agent.
+
 # ==============================================================================
 # --- End of Library ---
 # ============================================================================== 
