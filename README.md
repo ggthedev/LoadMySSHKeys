@@ -7,9 +7,12 @@ A comprehensive SSH key management tool that provides a menu-driven interface fo
 - **Menu-Driven Interface**: Easy-to-use command-line interface for managing SSH keys.
 - **Cross-Platform Support**: Works on both macOS and Linux systems.
 - **Automatic SSH Agent Management**:
-  - Automatically starts ssh-agent if not running.
-  - Manages agent environment variables via a persistent file (`~/.config/agent.env` by default).
-  - Handles key loading and unloading.
+  - **Dedicated Agent Tracking:** The script primarily tracks the agent it should use via a persistent environment file (default: `~/.config/agent.env`, override with `SKM_AGENT_ENV_FILE`). This file stores the `SSH_AUTH_SOCK` and `SSH_AGENT_PID` of the agent managed by this script.
+  - **Agent Validation:** Before performing actions, the script checks the details in the environment file. It verifies that the agent process (PID) is running and the communication socket exists.
+  - **Stale File Handling:** If the environment file exists but the agent it points to is no longer running (stale), the script removes the file.
+  - **Conditional Agent Start:** If the environment file is missing or was stale, a *new* `ssh-agent` process is started *only* if the requested action involves loading keys (e.g., `-a`, `-f`, menu options 3 or 6). The details of this new agent are then saved to the environment file.
+  - **Check-Only Actions:** For actions that *don't* load keys (e.g., `-l`, `-D`, menu options 2, 4, 5), if no valid agent is found via the environment file, the script will report that no agent is available and will *not* start a new one.
+  - **Isolation:** This approach ensures the script manages its own agent state via the file, minimizing interference with other `ssh-agent` processes that might be running on the system for other purposes.
 - **Key Management**:
   - Load keys based on finding files with matching `.pub` counterparts in the SSH directory.
   - Load specific key(s) interactively from the list of found keys.
@@ -26,6 +29,21 @@ A comprehensive SSH key management tool that provides a menu-driven interface fo
   - Log rotation (1MB max size, 5 files).
   - Detailed operation logging.
   - Error and warning tracking.
+
+## Code Structure
+
+The script has been refactored for better maintainability and organization. Core functionalities are now separated into library files located in the `lib/` directory relative to the main `sshkeymanager.sh` script. These libraries handle specific tasks such as:
+
+- `logging.sh`: Logging setup and functions.
+- `validation.sh`: Directory validation checks.
+- `agent.sh`: SSH agent management logic (checking, starting, validating).
+- `key_ops.sh`: Core operations for adding, listing, and deleting keys.
+- `cli.sh`: Command-line argument parsing and action dispatching.
+- `menu.sh`: Interactive menu display and logic.
+- `arg_helpers.sh`: Helper for checking `getopt`.
+- `helpers.sh`: Miscellaneous helpers (e.g., platform detection).
+
+The main `sshkeymanager.sh` script now primarily acts as an entry point that sources these libraries and orchestrates the overall execution flow.
 
 ## Requirements
 
