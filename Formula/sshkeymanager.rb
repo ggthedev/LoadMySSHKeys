@@ -2,70 +2,69 @@
 # frozen_string_literal: true
 
 class Sshkeymanager < Formula
-  desc "Manages SSH keys, agent, and loads keys for shell sessions"
+  desc "SSH key management tool with a menu driven interface as well as a CLI interface"
   homepage "https://github.com/ggthedev/SSHKEYSMANAGER"
-  url "https://github.com/ggthedev/SSHKEYSMANAGER/archive/refs/tags/0.0.1.tar.gz"
-  sha256 "6fa89fc75a733000f5804dd8d9bd8b83e291c9b3cd472ac65dad96030fe853d2"
-  version "0.0.1"
-
+  url "https://github.com/ggthedev/SSHKEYSMANAGER/archive/refs/tags/v0.0.1.2.tar.gz"
+  sha256 "0c6c1178b564812d8bdcb0c05052c25903a6f3f7a2296105fcc738127778d7fb"
+  license "BSD-3-Clause"
   head "https://github.com/ggthedev/SSHKEYSMANAGER.git", branch: "main"
 
+  depends_on "bash"
   depends_on "coreutils" # Provides 'date' with nanoseconds needed by the script
   # Make gnu-getopt optional on macOS
   depends_on "gnu-getopt" => :optional if OS.mac?
 
   def install
-    # Install the main script to bin
-    bin.install "sshkeymanager.sh"
-    # Install the agent setup script to libexec as it's meant to be sourced
-    libexec.install "ssh_agent_setup.sh"
+    # Install library and main script into libexec
+    libexec.install "lib"
+    libexec.install "sshkeymanager.sh"
 
-    # Use inreplace only if macOS AND the optional gnu-getopt was built
+    # Create a wrapper script using /usr/bin/env bash
+    (bin/"sshkeymanager").write <<~EOS
+      #!/usr/bin/env bash
+      # Execute the main script from libexec, relying on PATH for bash
+      exec "#{libexec}/sshkeymanager.sh" "$@"
+    EOS
+
+    # Keep gnu-getopt replacement logic if needed
     if OS.mac? && build.with?("gnu-getopt")
-      # Replace the simple `getopt` call with the full path to Homebrew's gnu-getopt
-      inreplace bin/"sshkeymanager.sh", "getopt", Formula["gnu-getopt"].opt_bin/"getopt"
+      inreplace libexec/"sshkeymanager.sh" do |s|
+        s.gsub! "/usr/local/opt/gnu-getopt/bin/getopt", Formula["gnu-getopt"].opt_bin/"getopt"
+        s.gsub! "/opt/homebrew/opt/gnu-getopt/bin/getopt", Formula["gnu-getopt"].opt_bin/"getopt"
+      end
     end
   end
 
   def caveats
     s = <<~EOS
-      The main utility `sshkeymanager.sh` has been installed to:
-        #{opt_bin}/sshkeymanager.sh
+      The main utility `sshkeymanager` has been installed.
 
-      To activate the SSH agent setup for your shell sessions, add the following
-      line to your shell profile (e.g., ~/.zshrc, ~/.bash_profile, ~/.profile):
+      **Compatibility Note:** This script works best with Bash version 4.0 or higher.
+      While it includes fallbacks for older Bash versions (like macOS default Bash 3.x),
+      using Bash 4.0+ is recommended for optimal performance and features.
 
-        source "#{opt_libexec}/ssh_agent_setup.sh"
-
-      Ensure you remove any previous manual sourcing of the agent script.
+      You can install a newer Bash via Homebrew if needed:
+        `brew install bash`
+      Then ensure the `bash` command in your PATH points to the newer version,
+      or explicitly run the script with the Homebrew Bash path.
 
       Configuration and logs are typically stored in:
         ~/.config/sshkeymanager/
         ~/Library/Logs/sshkeymanager/ (macOS) or ~/.local/log/sshkeymanager/ (Linux fallback)
-
-      Restart your shell or source your profile for changes to take effect.
     EOS
-
+    # Add gnu-getopt recommendation caveat if macOS
     if OS.mac?
       s += <<~EOS
 
-        On macOS, it is recommended to install with gnu-getopt for full compatibility
-        with command-line options:
+        On macOS, installing with gnu-getopt is recommended for full CLI compatibility:
           brew reinstall sshkeymanager --with-gnu-getopt
       EOS
     end
-
-    s # Return the combined caveats string
+    s
   end
 
   test do
-    # Test syntax of the sourced script
-    system "bash", "-n", libexec/"ssh_agent_setup.sh"
-
-    # Test presence and basic execution of the main script
-    assert_predicate bin/"sshkeymanager.sh", :exist?
-    assert_predicate bin/"sshkeymanager.sh", :executable?
-    # Check if running with --help works (replace with a more meaningful basic command if needed)
-    shell_output("#{bin}/sshkeymanager.sh --help")
+    # Basic test remains the same
+    assert_match "Usage: sshkeymanager", shell_output("#{bin}/sshkeymanager --help")
   end
 end 
