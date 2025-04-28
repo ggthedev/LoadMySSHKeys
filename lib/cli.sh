@@ -173,7 +173,7 @@ parse_args() {
 
     else
         # --- Use Simple Parsing Fallback ---
-        log_info "GNU getopt not found or incompatible. Using simple parser. Combined/long options and options with optional args may not work as expected."
+        log_warn "GNU getopt not found or incompatible. Using simple parser. Combined/long options and options with optional args may not work as expected."
 
         local args_copy=("$@")
         local i=0
@@ -195,7 +195,7 @@ parse_args() {
                     local next_arg_index=$((i + 1))
                     local next_arg="${args_copy[$next_arg_index]:-}"
                     if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
-                        printf "Error: Simple parser: Option '%s' requires a filename argument.\\n\\n" "$arg" >&2
+                        log_error "Simple parser: Option '$arg' requires a filename argument."
                         parse_error=1; break
                     fi
                     ACTION="file"; source_key_file="$next_arg"; FIRST_ACTION_SET=1
@@ -206,9 +206,17 @@ parse_args() {
                 -h) usage; exit 0 ;; # Handle help directly
                 *)
                     if [[ "$arg" == -* ]]; then
-                         printf "Error: Simple parser: Unknown or unsupported option '%s'\\n\\n" "$arg" >&2
+                        # Check if it looks like an invalid combined short option
+                        if [[ ${#arg} -gt 2 ]]; then
+                            # Print specific error to stderr for combined options
+                            printf "Error: Combined short options like '%s' are not supported without GNU getopt.\n       Try separate options (e.g., '%s %s') or install GNU getopt (e.g., 'brew install gnu-getopt').\\n\\n" "$arg" "${arg:0:2}" "-${arg:2:1}" >&2
+                        else
+                            # Log other unknown single-char options as DEBUG
+                            log_debug "Simple parser: Unknown or unsupported option '$arg'"
+                        fi
                     else
-                         printf "Error: Simple parser: Unexpected argument '%s'\\n\\n" "$arg" >&2
+                         # Log unexpected non-option arg as ERROR
+                         log_error "Simple parser: Unexpected argument '$arg'"
                     fi
                     parse_error=1; break ;;
             esac

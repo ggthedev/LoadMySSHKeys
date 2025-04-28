@@ -99,7 +99,7 @@ _check_gnu_getopt() {
 
     # 4. Log final status and restore set -e if it was originally set.
     if [ "$ret_status" -ne 0 ]; then
-        log_info "Compatible GNU getopt command not found. The script will use a simpler fallback parser. Some advanced command-line features might be unavailable. Recommendation: Install GNU getopt for full argument support (e.g., 'brew install gnu-getopt' on macOS)."
+        log_debug "Compatible GNU getopt command not found. The script will use a simpler fallback parser. Some advanced command-line features might be unavailable. Recommendation: Install GNU getopt for full argument support (e.g., 'brew install gnu-getopt' on macOS)."
     fi
 
     # Restore errexit. Assume the main script runs with set -e.

@@ -339,8 +339,7 @@ main() {
     # It will also handle --help internally and exit if needed.
     # It returns 0 on success, 1 on parsing error (which should trigger help).
     if ! parse_args "$@"; then
-        usage # Show help message on parsing error
-         exit 1
+        exit 1
     fi
 
     # --- Runtime Initialization Check (Post-Parsing) ---

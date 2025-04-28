@@ -243,8 +243,6 @@ log_error() {
         # Append formatted error message to the log file.
         # Format: Timestamp - PID - ERROR: Message
         echo "$timestamp - $$ - ERROR: $1" >> "$LOG_FILE"
-        # Print a notification to stderr, directing the user to the log file.
-        printf "An error occurred. See log for details: %s\n" "$LOG_FILE" >&2
     else
         # If logging is disabled, print a simple error message to stderr.
         printf "An error occurred. (Logging disabled)\n" >&2
@@ -258,8 +256,7 @@ log_error() {
 #              prints a generic warning notification to stderr pointing to the log file.
 # @arg        $1 String The warning message.
 # @appends    Formatted log line to the log file if logging is enabled.
-# @prints     Generic warning message to stderr if logging is enabled, or a simple
-#             warning message if logging is disabled.
+# @prints     Generic warning message to stderr if logging is enabled.
 # @stdout     None
 # @stderr     Warning notification message.
 # @depends    Global variable: LOG_FILE. External command: date, echo, printf.
@@ -272,11 +269,10 @@ log_warn() {
         # Append formatted warning message to the log file.
         # Format: Timestamp - PID - WARN: Message
         echo "$timestamp - $$ - WARN: $1" >> "$LOG_FILE"
-        # Print a notification to stderr, directing the user to the log file.
-        printf "A warning occurred. See log for details: %s\n" "$LOG_FILE" >&2
     else
-        # If logging is disabled, print a simple warning message to stderr.
-        printf "A warning occurred. (Logging disabled)\n" >&2
+        # If logging is disabled, perhaps print warning directly?
+        # For now, we do nothing on stderr if logging is off for warnings.
+        : # No-op
     fi
 }
 
