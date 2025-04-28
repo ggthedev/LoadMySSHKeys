@@ -369,8 +369,6 @@ main() {
         file)       run_load_keys_from_file "$source_key_file" ;; # Now defined in lib/cli.sh
         delete-all) run_delete_all_cli ;; # Now defined in lib/cli.sh
         menu)       run_interactive_menu ;; # Now defined in lib/menu.sh
-        generate)   run_generate_key ;; # Assumes defined in lib/cli.sh or key_ops.sh
-        delete-pair) run_delete_key_pair ;; # Assumes defined in lib/cli.sh or key_ops.sh
         help|*)     # Should not be reached if parse_args handles help correctly
                     usage
                     exit 0 ;;

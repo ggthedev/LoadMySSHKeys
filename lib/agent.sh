@@ -165,52 +165,43 @@ _start_new_agent() {
 #
 # @description Ensures that a usable SSH agent, managed via $AGENT_ENV_FILE,
 #              is running and its environment variables are exported.
-#              1. Checks if variables are set in current env AND agent is live.
-#              2. If not, attempts to load from $AGENT_ENV_FILE and validate.
-#              3. If file invalid/stale or doesn't exist, starts a new agent
-#                 and saves its details to $AGENT_ENV_FILE.
-# @arg        None
+#              The behavior depends on the requested mode.
+# @arg        $1 String Mode: "load" or "check".
+#                 - "load": If no valid agent is found, start a new one.
+#                 - "check": If no valid agent is found, report failure without starting.
 # @uses       Global variables: AGENT_ENV_FILE.
 # @modifies   Exports SSH_AUTH_SOCK and SSH_AGENT_PID environment variables.
-# @modifies   May create or overwrite $AGENT_ENV_FILE.
+# @modifies   May create or overwrite $AGENT_ENV_FILE (if mode is "load").
 # @return     0 If an agent is confirmed running and variables exported.
-# @return     1 If validating or starting an agent fails.
+# @return     1 If mode is "check" and no valid agent found, OR if mode is "load"
+#               and starting a new agent fails, OR if mode argument is invalid.
 # @prints     Status messages to stdout/stderr.
 # @stdout     Informational messages (agent running, connected, started).
-# @stderr     Error messages if agent validation/start fails.
+# @stderr     Error messages if agent validation/start fails or mode invalid.
 # @depends    Functions: _is_agent_live, _start_new_agent, log_debug, log_info, log_error, log_warn.
 #             External commands: rm, echo, grep, sed (or parameter expansion).
 # ---
 ensure_ssh_agent() {
-    log_debug "Entering function: ${FUNCNAME[0]}"
-    log_info "Ensuring dedicated SSH agent (via $AGENT_ENV_FILE) is active..."
+    local mode="$1"
+    log_debug "Entering function: ${FUNCNAME[0]} (Mode: '$mode')"
+    log_info "Ensuring dedicated SSH agent (via $AGENT_ENV_FILE) is active (Mode: '$mode')..."
 
-    # 1. Check if agent appears live based on CURRENT environment variables.
-    #    This handles the case where the script is run multiple times in the same
-    #    shell where a previous invocation already exported the variables.
-    if [ -n "${SSH_AGENT_PID:-}" ] && [ -n "${SSH_AUTH_SOCK:-}" ]; then
-        log_debug "Found agent vars in current env (PID: $SSH_AGENT_PID, SOCK: $SSH_AUTH_SOCK). Validating liveness..."
-        if _is_agent_live "$SSH_AGENT_PID" "$SSH_AUTH_SOCK"; then
-            log_info "Agent from current environment is live and ready."
-            printf "SSH agent is already running (PID: %s, Socket: %s).\n" "$SSH_AGENT_PID" "$SSH_AUTH_SOCK"
-            # Ensure they are exported just in case
-            export SSH_AUTH_SOCK SSH_AGENT_PID
-            return 0 # Success: Agent from env is live.
-        else
-            log_info "Agent vars found in current env, but agent is not live (PID: $SSH_AGENT_PID, SOCK: $SSH_AUTH_SOCK). Will check/update file."
-            # Unset stale vars from env before proceeding
-            unset SSH_AUTH_SOCK SSH_AGENT_PID
-        fi
+    # Validate mode argument
+    if [[ "$mode" != "load" && "$mode" != "check" ]]; then
+        log_error "Invalid mode '$mode' passed to ensure_ssh_agent. Must be 'load' or 'check'."
+        printf "Error: Internal script error - invalid agent mode requested.\n" >&2
+        return 1
     fi
 
-    # 2. If not live in current env, check the persistent file.
+    # --- Primary Logic: Check the persistent file --- 
     log_debug "Checking persistent agent file: $AGENT_ENV_FILE"
+    local agent_found_valid=false
+
     if [ -f "$AGENT_ENV_FILE" ]; then
         log_debug "Persistent file exists. Parsing and validating..."
         local file_agent_sock file_agent_pid
 
         # Parse variables directly from the file without fully sourcing
-        # Use grep and parameter expansion for safety
         local sock_line pid_line temp_sock temp_pid
         sock_line=$(grep '^SSH_AUTH_SOCK=' "$AGENT_ENV_FILE")
         pid_line=$(grep '^SSH_AGENT_PID=' "$AGENT_ENV_FILE")
@@ -224,31 +215,54 @@ ensure_ssh_agent() {
 
         # Validate the agent details found in the file
         if [ -n "$file_agent_pid" ] && [ -n "$file_agent_sock" ] && _is_agent_live "$file_agent_pid" "$file_agent_sock"; then
-            # Agent from file is live! Export vars and return.
+            # Agent from file is live! Export vars and set flag.
             log_info "Agent details from file '$AGENT_ENV_FILE' are valid and agent is live."
             printf "Successfully connected to existing ssh-agent (PID: %s, Socket: %s).\n" "$file_agent_pid" "$file_agent_sock"
             export SSH_AUTH_SOCK="$file_agent_sock"
             export SSH_AGENT_PID="$file_agent_pid"
-            return 0 # Success: Reconnected via file.
+            agent_found_valid=true
         else
             log_warn "Agent details in '$AGENT_ENV_FILE' are invalid or agent is not live (PID: '$file_agent_pid', SOCK: '$file_agent_sock'). Removing stale file."
             rm -f "$AGENT_ENV_FILE" 2>/dev/null || log_warn "Failed to remove stale agent file: $AGENT_ENV_FILE"
             # Ensure vars are unset if they came from the stale file
             unset SSH_AUTH_SOCK SSH_AGENT_PID
+            # agent_found_valid remains false
         fi
     else
          log_info "Persistent agent file '$AGENT_ENV_FILE' not found."
+         # agent_found_valid remains false
     fi
 
-    # 3. If no valid agent found yet (env or file), start a new one.
-    if _start_new_agent; then
-        # _start_new_agent already exported vars and saved file
-        log_info "New agent started and environment configured successfully."
-        return 0 # Success: New agent started.
+    # --- Action based on validation result and mode --- 
+    if [[ "$agent_found_valid" == true ]]; then
+        log_debug "ensure_ssh_agent: Existing valid agent confirmed. Returning success."
+        return 0 # Success: Valid agent found and loaded.
+    fi
+
+    # If we get here, no valid agent was found from the file.
+    log_info "No valid existing agent found via '$AGENT_ENV_FILE'."
+
+    if [[ "$mode" == "load" ]]; then
+        # Mode requires loading/starting an agent.
+        log_info "Mode is 'load', attempting to start a new agent..."
+        if _start_new_agent; then
+            # _start_new_agent already exported vars and saved file
+            log_info "New agent started and environment configured successfully."
+            return 0 # Success: New agent started.
+        else
+            log_error "Failed to start and configure a new SSH agent."
+            printf "Error: Failed to start or configure ssh-agent.\n" >&2
+            return 1 # Failure: Could not start agent.
+        fi
+    elif [[ "$mode" == "check" ]]; then
+        # Mode only requires checking; no valid agent found, so report failure.
+        log_info "Mode is 'check', no valid agent found. Reporting agent unavailable."
+        # Don't print here, let the caller decide the user message.
+        return 1 # Failure: No agent available for check.
     else
-        log_error "Failed to start and configure a new SSH agent."
-        printf "Error: Failed to start or configure ssh-agent.\n" >&2
-        return 1 # Failure: Could not start agent.
+        # Should be unreachable due to initial mode check, but handle defensively.
+        log_error "Internal error: Reached end of ensure_ssh_agent with invalid mode '$mode'."
+        return 1
     fi
 
 } # END ensure_ssh_agent

@@ -68,11 +68,6 @@ Options:
   -D, --delete-all    Delete all keys currently loaded in the ssh-agent. Prompts for
                       confirmation before proceeding.
   -m, --menu          Show the interactive text-based menu interface for managing keys.
-  -g, --generate [type] [bits] [comment] [filename]
-                      Generate a new SSH key pair (interactive prompts if args missing).
-  -X, --delete-pair <key_basename>
-                      Delete an SSH key pair (both private and public files) from disk.
-                      Prompts for confirmation. <key_basename> is the name without .pub.
   -v, --verbose       Enable verbose (DEBUG level) logging to the log file. Useful
                       for troubleshooting.
   -h, --help          Display this help message and exit.
@@ -86,8 +81,6 @@ Examples:
   $(basename "$0") --file my_keys.txt # Load keys listed in my_keys.txt
   $(basename "$0") --delete-all    # Delete all loaded keys (prompts)
   $(basename "$0") --menu          # Start the interactive menu
-  $(basename "$0") --generate      # Generate key interactively
-  $(basename "$0") --delete-pair id_rsa # Delete id_rsa and id_rsa.pub
   $(basename "$0")                 # Show this help message
 
 Configuration Files & Paths:
@@ -135,14 +128,9 @@ parse_args() {
     if _check_gnu_getopt; then
         # --- Use GNU Getopt Parsing ---
         log_debug "Using GNU getopt ($GNU_GETOPT_CMD) for argument parsing."
-        # Note: Added g, X options
-        local short_opts="la:f:DmgX:hv"
-        local long_opts="list,add,file:,delete-all,menu,generate:,delete-pair:,help,verbose"
+        local short_opts="laf:Dmhv"
+        local long_opts="list,add,file:,delete-all,menu,help,verbose"
         local ARGS
-        # We need to handle optional arguments for --generate and --delete-pair carefully.
-        # getopt doesn't directly support optional arguments in the way we might want
-        # (e.g., --generate without args vs --generate type bits...).
-        # We'll capture the argument presence and value, then validate in the run_* function.
         if ! ARGS=$($GNU_GETOPT_CMD -o "$short_opts" --long "$long_opts" -n "$(basename "$0")" -- "$@"); then
             log_error "Argument parsing error ($GNU_GETOPT_CMD failed). See usage below."
             return 1 # Indicate parsing failure
@@ -152,7 +140,7 @@ parse_args() {
             case "$1" in
                 -l|--list)
                     ACTION="list"; shift ;;
-                -a|--add) # Simple --add flag
+                -a|--add)
                     ACTION="add"; shift ;;
                 -f|--file)
                     ACTION="file"; source_key_file="$2"; shift 2 ;;
@@ -160,16 +148,6 @@ parse_args() {
                     ACTION="delete-all"; shift ;;
                 -m|--menu)
                     ACTION="menu"; shift ;;
-                -g|--generate)
-                    ACTION="generate"
-                    # Capture potential argument, let run_generate_key handle parsing/validation
-                    source_key_file="$2" # Reusing source_key_file for simplicity, maybe rename later
-                    shift 2 ;;
-                 -X|--delete-pair)
-                     ACTION="delete-pair"
-                     # Capture potential argument
-                     source_key_file="$2" # Reusing source_key_file
-                     shift 2 ;;
                 -v|--verbose)
                     IS_VERBOSE="true"; shift ;;
                 -h|--help)
@@ -224,16 +202,6 @@ parse_args() {
                     i=$((i + 2)) ;;
                 -D) ACTION="delete-all"; FIRST_ACTION_SET=1; i=$((i + 1)) ;;
                 -m) ACTION="menu"; FIRST_ACTION_SET=1; i=$((i + 1)) ;;
-                -g) ACTION="generate"; FIRST_ACTION_SET=1; i=$((i + 1)) ;; # Simple parser: No arguments handled
-                -X)
-                     local next_arg_index=$((i + 1))
-                     local next_arg="${args_copy[$next_arg_index]:-}"
-                     if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
-                          printf "Error: Simple parser: Option '%s' requires a key basename argument.\\n\\n" "$arg" >&2
-                          parse_error=1; break
-                     fi
-                     ACTION="delete-pair"; source_key_file="$next_arg"; FIRST_ACTION_SET=1
-                     i=$((i + 2)) ;;
                 -v) IS_VERBOSE="true"; i=$((i + 1)) ;;
                 -h) usage; exit 0 ;; # Handle help directly
                 *)
@@ -288,11 +256,12 @@ run_list_keys() {
     log_debug "Validating SSH dir..."
     if ! validate_ssh_dir; then exit 1; fi
 
-    log_debug "Ensuring agent is running..."
-    if ! ensure_ssh_agent; then
-        log_error "Failed to ensure SSH agent is running. Cannot list keys."
-        # ensure_ssh_agent prints detailed errors
-        printf "Error: Agent not available. Cannot list keys.\n" >&2
+    log_debug "Checking agent status (mode: check)..."
+    # Use "check" mode: only succeed if a valid agent is found via agent.env
+    if ! ensure_ssh_agent "check"; then
+        log_info "No valid agent found (or error checking). Cannot list keys."
+        # ensure_ssh_agent logs details; we provide the user message.
+        printf "No running SSH agent found to list keys from.\nHint: Start the menu with '%s --menu' or add keys with '-a' or '-f'.\n" "$(basename "$0")" >&2
         exit 1
     fi
 
@@ -324,7 +293,13 @@ run_load_keys() {
 
     # Initial checks.
     if ! validate_ssh_dir; then exit 1; fi
-    if ! ensure_ssh_agent; then exit 1; fi
+    log_debug "Ensuring agent is running (mode: load)..."
+    # Use "load" mode: start agent if needed
+    if ! ensure_ssh_agent "load"; then
+         log_error "Failed to ensure SSH agent is running. Cannot load keys."
+         printf "Error: Failed to connect to or start SSH agent. Cannot load keys.\n" >&2
+         exit 1
+    fi
 
     # Find potential keys and populate the temporary list file.
     log_debug "run_load_keys: Updating temporary key list file '$KEYS_LIST_TMP'..."
@@ -384,10 +359,17 @@ run_delete_all_cli() {
 
     # Initial checks.
     if ! validate_ssh_dir; then exit 1; fi
-    # Do NOT ensure agent here. Let delete_all_keys handle the check.
-    # if ! ensure_ssh_agent; then exit 1; fi # Agent required for deletion.
 
-    # Call the function that handles confirmation and deletion.
+    log_debug "Checking agent status (mode: check)..."
+    # Use "check" mode: only proceed if agent already exists
+    if ! ensure_ssh_agent "check"; then
+         log_info "No valid agent found (or error checking). Cannot delete keys."
+         printf "No running SSH agent found to delete keys from.\nHint: Start the menu with '%s --menu' or add keys first.\n" "$(basename "$0")" >&2
+         exit 1
+    fi
+
+    # Agent confirmed. Call the function that handles confirmation and deletion.
+    log_debug "Agent confirmed. Calling delete_all_keys..."
     delete_all_keys
     local delete_status=$?
     log_debug "Exiting function: ${FUNCNAME[0]} with status $delete_status"
@@ -430,7 +412,13 @@ run_load_keys_from_file() {
     fi
     # Validate SSH dir and agent
     if ! validate_ssh_dir; then exit 1; fi
-    if ! ensure_ssh_agent; then exit 1; fi
+    log_debug "Ensuring agent is running (mode: load)..."
+    # Use "load" mode: start agent if needed
+    if ! ensure_ssh_agent "load"; then
+         log_error "Failed to ensure SSH agent is running. Cannot load keys from file."
+         printf "Error: Failed to connect to or start SSH agent. Cannot load keys.\n" >&2
+         exit 1
+    fi
 
     # Prepare VALID_KEY_LIST_FILE by copying from source, removing comments/blanks
     log_debug "Preparing target list file $VALID_KEY_LIST_FILE from source $source_key_file"
@@ -450,42 +438,6 @@ run_load_keys_from_file() {
         log_info "List file '$source_key_file' was empty or only contained comments/blanks. Agent cleared. Nothing to add."
         exit 0 # Success, agent cleared, no keys to add.
     fi
-}
-
-# --- run_generate_key ---
-#
-# @description Placeholder handler for the `-g` or `--generate` CLI option.
-#              (Actual implementation should be in lib/key_ops.sh)
-# @arg         Potentially arguments for type, bits, comment, filename captured
-#              in global $source_key_file by parse_args (needs refinement).
-# @exits      Currently exits with status 1 (not implemented).
-# @depends    Functions: log_info, log_error.
-# ---
-run_generate_key() {
-    log_info "CLI Action: Generate new key (--generate)..."
-    log_error "Feature not yet fully implemented in CLI mode."
-    # TODO: Call handle_generate_new_key (from lib/key_ops.sh) here.
-    #       Need to parse arguments potentially captured in $source_key_file
-    #       or prompt interactively if none were given via CLI.
-    printf "Error: Key generation via CLI not yet implemented.\n" >&2
-    exit 1
-}
-
-# --- run_delete_key_pair ---
-#
-# @description Placeholder handler for the `-X` or `--delete-pair` CLI option.
-#              (Actual implementation should be in lib/key_ops.sh)
-# @arg         Key basename captured in global $source_key_file by parse_args.
-# @exits       Currently exits with status 1 (not implemented).
-# @depends     Functions: log_info, log_error.
-# ---
-run_delete_key_pair() {
-    local key_basename="$1" # Get argument from main dispatch
-    log_info "CLI Action: Delete key pair (--delete-pair '$key_basename')..."
-    log_error "Feature not yet fully implemented in CLI mode."
-    # TODO: Call delete_ssh_key_pair (from lib/key_ops.sh) here, passing $key_basename.
-    printf "Error: Key pair deletion via CLI not yet implemented.\n" >&2
-    exit 1
 }
 
 # ==============================================================================

@@ -311,14 +311,6 @@ delete_keys_from_agent() {
 load_specific_keys() {
     log_debug "Entering function: ${FUNCNAME[0]}"
 
-    # Ensure the agent is running before proceeding
-    if ! ensure_ssh_agent; then
-        log_error "Cannot load specific keys: Failed to ensure SSH agent is running."
-        # ensure_ssh_agent prints detailed errors
-        printf "Error: Agent not available. Cannot load keys.\n" >&2
-        return 1
-    fi
-
     printf "\n+++ Load Specific Key(s) into Agent +++\n"
 
     # 1. Get List of Potential Keys
@@ -630,16 +622,7 @@ delete_single_key() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     printf "\n--- Delete Single Key from Agent ---\n"
 
-    # Ensure the agent is running before proceeding
-    if ! ensure_ssh_agent; then
-        log_error "Cannot delete single key: Failed to ensure SSH agent is running."
-        # ensure_ssh_agent prints detailed errors
-        printf "Error: Agent not available. Cannot delete key.\n" >&2
-        return 1
-    fi
-
-    # 1. Check Agent Status and Key Presence
-    #    Use `ssh-add -l` to check if agent is running AND if it has keys.
+    # 1. Check Agent Status and Key Presence (using ssh-add -l directly)
     local agent_check_status list_output return_status=1 # Default to failure
     if list_output=$(ssh-add -l 2>&1); then
         agent_check_status=0 # Command succeeded (agent running, might have keys or be empty).
@@ -795,15 +778,7 @@ delete_all_keys() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     printf "\n+++ Delete All Keys from Agent +++\n"
 
-    # Ensure the agent is running before attempting deletion
-    if ! ensure_ssh_agent; then
-        log_error "Cannot delete all keys: Failed to ensure SSH agent is running."
-        # ensure_ssh_agent prints detailed errors
-        printf "Error: Agent not available. Cannot delete keys.\n" >&2
-        return 1 # Return failure, don't proceed to confirmation
-    fi
-
-    # 1. Check Agent Status and Key Count
+    # 1. Check Agent Status and Key Count (using ssh-add -l directly)
     local agent_check_status key_count=0 list_output="" return_status=1 # Default to failure
 
     # Use `ssh-add -l` to check agent status and get key list if present.

@@ -269,10 +269,11 @@ display_log_location() {
 _perform_list_keys_check() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     printf "\n--- Listing Keys Currently in Agent ---\n"
-    # First, ensure the agent is available.
-    if ! ensure_ssh_agent; then
-        log_error "_perform_list_keys_check: Cannot list keys, ensure_ssh_agent failed."
-        # ensure_ssh_agent already prints error messages.
+    # First, ensure the agent is available using "check" mode.
+    if ! ensure_ssh_agent "check"; then
+        log_info "_perform_list_keys_check: No valid agent found (or error checking). Cannot list keys."
+        # ensure_ssh_agent logs details; we provide the user message.
+        printf "No running SSH agent found to list keys from.\nHint: Use menu option 6 (Reload) or 3 (Load Specific) to add keys.\n" >&2
         return 1 # Failure: Agent not available.
     fi
     # Agent is running, proceed to list keys.
@@ -331,34 +332,48 @@ run_interactive_menu() {
                 ;;
             2)  # List Keys
                 log_debug "Main loop - Case 2: Calling _perform_list_keys_check..."
-                # Calls helper which ensures agent then lists.
-                _perform_list_keys_check || true
+                _perform_list_keys_check || true # Helper now calls ensure_ssh_agent "check"
                 wait_for_key
                 ;;
             3)  # Load Specific Key(s)
-                log_debug "Main loop - Case 3: Calling load_specific_keys..."
-                load_specific_keys || true
+                log_debug "Main loop - Case 3: Ensuring agent (mode: load) before calling load_specific_keys..."
+                if ensure_ssh_agent "load"; then
+                    load_specific_keys || true
+                else
+                    log_error "Menu: Failed to ensure agent is ready for loading specific keys."
+                    printf "Error: Agent could not be started or connected. Cannot load keys.\n" >&2
+                fi
                 wait_for_key
                 ;;
             4)  # Delete Single Key
-                log_debug "Main loop - Case 4: Calling delete_single_key..."
-                delete_single_key || true
+                log_debug "Main loop - Case 4: Ensuring agent (mode: check) before calling delete_single_key..."
+                if ensure_ssh_agent "check"; then
+                    delete_single_key || true
+                else
+                    log_info "Menu: No valid agent found for deleting single key."
+                    printf "No running SSH agent found to delete keys from.\n" >&2
+                fi
                 wait_for_key
                 ;;
             5)  # Delete All Keys
-                log_debug "Main loop - Case 5: Calling delete_all_keys..."
-                # Asks for confirmation internally.
-                delete_all_keys || true
+                log_debug "Main loop - Case 5: Ensuring agent (mode: check) before calling delete_all_keys..."
+                if ensure_ssh_agent "check"; then
+                     # delete_all_keys handles confirmation internally.
+                     delete_all_keys || true
+                else
+                     log_info "Menu: No valid agent found for deleting all keys."
+                     printf "No running SSH agent found to delete keys from.\n" >&2
+                fi
                 wait_for_key
                 ;;
             6)  # Reload All Keys (from selected dir)
                 printf "\n--- Reload All Keys (from selected dir) ---\n"
                 log_info "Menu: Reloading all keys selected (uses find -> delete -> add)."
 
-                # Ensure agent is running first.
-                if ! ensure_ssh_agent; then
+                # Ensure agent is running first using "load" mode.
+                if ! ensure_ssh_agent "load"; then
                     log_error "Cannot reload keys: Failed to ensure SSH agent is running."
-                    printf "Error: Agent not available. Cannot reload keys.\n" >&2
+                    printf "Error: Failed to connect to or start SSH agent. Cannot reload keys.\n" >&2
                     wait_for_key; continue # Go back to menu start.
                 fi
 
