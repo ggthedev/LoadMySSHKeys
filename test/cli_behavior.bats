@@ -42,10 +42,9 @@ run_script() {
 setup() {
     # Create a unique temporary directory for this test run
     TEST_TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sshkeymanager-test.XXXXXX")
-    MOCK_BIN_DIR="$TEST_TEMP_DIR/bin"
+    MOCK_BIN_DIR="$TEST_TEMP_DIR/bin" # Keep mock bin for potential future mocks
     MOCK_HOME_DIR="$TEST_TEMP_DIR/home"
     MOCK_SSH_DIR="$MOCK_HOME_DIR/.ssh"
-    MOCK_AGENT_KEYS_STATE_FILE="$TEST_TEMP_DIR/mock_agent_keys.txt"
     AGENT_PID_FILE="$TEST_TEMP_DIR/agent.pid"
     AGENT_SOCK_FILE="$TEST_TEMP_DIR/agent.sock" # File to store sock path
     local agent_env_file="$TEST_TEMP_DIR/config/agent.env"
@@ -56,10 +55,6 @@ setup() {
     mkdir -p "$MOCK_SSH_DIR"
     mkdir -p "$TEST_TEMP_DIR/logs"
     mkdir -p "$TEST_TEMP_DIR/config"
-
-    # Copy/link mock ssh-add (ssh-agent mock removed)
-    cp "$BATS_TEST_DIRNAME/mocks/ssh-add" "$MOCK_BIN_DIR/ssh-add"
-    chmod +x "$MOCK_BIN_DIR/ssh-add"
 
     # Start a real ssh-agent
     echo "Starting real ssh-agent for test suite..." >&3 # Bats debug stream
@@ -101,17 +96,14 @@ setup() {
       echo "SSH_AGENT_PID=$parsed_agent_pid; export SSH_AGENT_PID;"
     } > "$agent_env_file"
 
-    # Create mock key files in mock SSH dir
-    echo "mock rsa key" > "$MOCK_SSH_DIR/id_rsa"
-    echo "mock rsa public key" > "$MOCK_SSH_DIR/id_rsa.pub"
-    echo "mock ed key" > "$MOCK_SSH_DIR/id_ed25519"
-    echo "mock ed public key" > "$MOCK_SSH_DIR/id_ed25519.pub"
-    echo "some other file" > "$MOCK_SSH_DIR/known_hosts" # Example non-key file
-    echo "key without pub" > "$MOCK_SSH_DIR/no_pub_key"
+    # Generate test key files dynamically in mock SSH dir
+    echo "Generating test keys in $MOCK_SSH_DIR..." >&3
+    ssh-keygen -t rsa -b 2048 -N '' -f "$MOCK_SSH_DIR/test_rsa" -q <<< y || { echo "Failed to generate test_rsa key" >&3; exit 1; }
+    ssh-keygen -t ed25519 -N '' -f "$MOCK_SSH_DIR/test_ed25519" -q <<< y || { echo "Failed to generate test_ed25519 key" >&3; exit 1; }
 
-    # Initialize mock agent state file (for ssh-add mock)
-    # Ensure it's empty at the start of each test
-    > "$MOCK_AGENT_KEYS_STATE_FILE"
+    # Add some other files to test filtering logic
+    echo "some other file" > "$MOCK_SSH_DIR/known_hosts"
+    echo "key without pub" > "$MOCK_SSH_DIR/no_pub_key"
 
     # Export agent vars for subsequent 'run' commands within tests
     # Note: export in setup applies to the main bats process env
@@ -177,83 +169,74 @@ teardown() {
     # Now run the script
     run_script -l -v
     [ "$status" -eq 1 ] # Expect specific exit status 1
-    # Check console output for the specific "No agent" message
+    # Check console output
     [[ "$output" == *"No running SSH agent found"* ]]
-    # Check stderr hint
-    [[ "$output" == *"Hint: Ensure agent is running"* ]]
+    [[ "$output" == *"Hint: Start the menu with 'sshkeymanager.sh --menu'"* ]]
 
-    # Check the log file for DEBUG entries and the specific agent error
+    # Check the log file
     local log_file="$TEST_TEMP_DIR/logs/sshkeymanager.log"
     [ -f "$log_file" ]
     grep -q "DEBUG: Verbose Logging: 'true'" "$log_file"
-    grep -q "INFO: _perform_list_keys_check: No usable agent found." "$log_file"
+    # Check the updated log message for no agent found during list
+    grep -q "INFO: No valid agent found.*Cannot list keys." "$log_file"
 }
 
-@test "4. CLI: -a (add all keys) should find keys, clear mock agent, add keys to mock agent" {
+@test "4. CLI: -a (add all keys) should find keys, clear agent, add keys to real agent" {
     # Run with verbose flag for detailed logging
     run_script -a -v
 
     [ "$status" -eq 0 ] # Expect success
-    # Check console output - Check for the message actually printed, not the log message
+    # Check console output
     [[ "$output" == *"Found 2 potential key file(s)"* ]]
-    [[ "$output" == *"All identities removed."* || "$output" == *"All keys successfully deleted from agent."* ]] # Output from mock ssh-add -D or real ssh-add
+    [[ "$output" == *"All identities removed."* || "$output" == *"All keys successfully deleted from agent."* ]]
     [[ "$output" == *"Adding SSH keys to agent"* ]]
-    # Check for the script's own confirmation messages, not the mock's output
-    [[ "$output" == *"✓ Added key 'id_rsa'"* ]]
-    [[ "$output" == *"✓ Added key 'id_ed25519'"* ]]
+    [[ "$output" == *"✓ Added key 'test_rsa'"* ]]
+    [[ "$output" == *"✓ Added key 'test_ed25519'"* ]]
     [[ "$output" == *"Summary: 2 key(s) added, 0 key(s) failed/skipped."* ]]
 
-    # Check internal list file was created correctly
+    # Check internal list file
     local internal_list="$TEST_TEMP_DIR/config/ssh_keys_list"
     [ -f "$internal_list" ]
-    grep -q "^id_rsa$" "$internal_list"
-    grep -q "^id_ed25519$" "$internal_list"
+    grep -q "^test_rsa$" "$internal_list"
+    grep -q "^test_ed25519$" "$internal_list"
     [ $(wc -l < "$internal_list") -eq 2 ]
-
-    # Check mock agent state file
-    [ -f "$MOCK_AGENT_KEYS_STATE_FILE" ]
-    grep -q "^id_rsa$" "$MOCK_AGENT_KEYS_STATE_FILE"
-    grep -q "^id_ed25519$" "$MOCK_AGENT_KEYS_STATE_FILE"
-    [ $(wc -l < "$MOCK_AGENT_KEYS_STATE_FILE") -eq 2 ]
 
     # Check log file
     local log_file="$TEST_TEMP_DIR/logs/sshkeymanager.log"
     [ -f "$log_file" ]
     grep -q "INFO: CLI Action: Loading keys found in $MOCK_SSH_DIR (--add)" "$log_file"
     grep -q "INFO: Deleting existing keys from agent before loading" "$log_file"
-    grep -q "INFO: Adding keys found by find" "$log_file"
-    grep -q "INFO: Successfully added 'id_rsa'" "$log_file"
-    grep -q "INFO: Successfully added 'id_ed25519'" "$log_file"
+    # Check updated success messages
+    grep -q "INFO: Successfully added key 'test_rsa' to agent." "$log_file"
+    grep -q "INFO: Successfully added key 'test_ed25519' to agent." "$log_file"
 }
 
-@test "5. CLI: -l (list keys) after -a should show keys added by mock ssh-add" {
+@test "5. CLI: -l (list keys) after -a should show keys added by real ssh-add" {
     # --- Setup specific state for this test ---
-    # Run the '-a' command first to populate the mock agent via mock ssh-add
-    # Redirect output to /dev/null as we don't care about it here.
+    # Run the '-a' command first to populate the real agent via ssh-add
     echo "Running prerequisite: sshkeymanager.sh -a" >&3
     run_script -a > /dev/null
     [ "$status" -eq 0 ] # Ensure prerequisite '-a' succeeded
-    # MOCK_AGENT_KEYS_STATE_FILE should now contain id_rsa and id_ed25519
-    # The real agent started in setup is running, script should find it.
 
     # --- Now run the actual test command ---
     echo "Running test command: sshkeymanager.sh -l" >&3
     run_script -l
     [ "$status" -eq 0 ] # Expect success
 
-    # Check output matches mock ssh-add -l format based on MOCK_AGENT_KEYS_STATE_FILE
+    # Check output matches real ssh-add -l format (check for key types)
     [[ "$output" == *"Keys currently loaded in the agent:"* ]]
-    [[ "$output" == *"SHA256:FAKEKEYHASHid_rsa id_rsa (MOCK_TYPE)"* ]]
-    [[ "$output" == *"SHA256:FAKEKEYHASHid_ed25519 id_ed25519 (MOCK_TYPE)"* ]]
+    echo "$output" | grep -q "(RSA)"
+    echo "$output" | grep -q "(ED25519)"
 
     # Check log file
     local log_file="$TEST_TEMP_DIR/logs/sshkeymanager.log"
     [ -f "$log_file" ]
-    # Check that the '-l' action was logged *after* the '-a' action completed
     grep -q "INFO: CLI Action: Loading keys found.*(--add)" "$log_file"
     grep -q "INFO: CLI Action: Listing keys (--list)" "$log_file"
-    grep -q "INFO: Agent already running and sourced" "$log_file" # Check agent found msg
-    grep -q "INFO: Keys currently loaded in the agent:" "$log_file"
+    # Check updated agent found message
+    grep -q "INFO: Agent details from file .* are valid and agent is live." "$log_file"
+    # Check updated message for listing keys
+    grep -q "INFO: Keys currently loaded in the agent according to \`ssh-add -l\`" "$log_file"
 }
 
 # Add more test cases here... 
