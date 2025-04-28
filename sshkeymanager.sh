@@ -728,25 +728,24 @@ delete_keys_from_agent() {
 
     log_debug "ssh-add -D exit status: $del_status"
     case "$del_status" in
-        0) # Success: Keys were deleted.
-            log_info "All keys successfully deleted from agent."
-            printf "All keys successfully deleted from agent.\\n"
-        return 0
-            ;;
-        1) # Common "error": No identities found in the agent.
-            log_info "No keys found in agent to delete (ssh-add -D status: 1)."
-            printf "No keys found in agent to delete.\\n"
-            # Treat this as success because the state (no keys) is achieved.
+        0) # Success: Keys were deleted (or none existed).
+            log_info "All keys successfully deleted from agent (or agent was empty)."
+            printf "All keys successfully deleted from agent.\n"
             return 0
             ;;
-        2) # Error: Could not connect to the agent.
+        1) # Failure: Often means agent unreachable.
+            log_warn "Could not delete keys (ssh-add -D status: 1). Agent might not be running."
+            printf "Warning: Could not delete keys. Agent might not be running (ssh-add -D status: 1).\n" >&2
+            return 1 # Treat status 1 as failure
+            ;;
+        2) # Error: More specific connection error.
             log_error "Failed to delete keys: Could not connect to agent (ssh-add -D status: 2)."
-            printf "Error: Could not connect to the SSH agent.\\n" >&2
-        return 1
+            printf "Error: Could not connect to the SSH agent.\n" >&2
+            return 1
             ;;
         *) # Other unexpected errors.
             log_error "Failed to delete keys from agent (ssh-add -D status: $del_status)."
-            printf "Error: Failed to delete keys from agent (Code: %s).\\n" "$del_status" >&2
+            printf "Error: Failed to delete keys from agent (Code: %s).\n" "$del_status" >&2
             return 1
             ;;
     esac
@@ -967,20 +966,20 @@ load_specific_keys() {
 display_main_menu() {
     log_debug "Displaying main menu..."
     clear # Clear the terminal screen.
-    printf "\\n======= SSH Key Manager Menu =======\\n"
-    printf " Platform: %s\\n" "$PLATFORM"
-    printf " SSH Directory: %s\\n" "$SSH_DIR"
-    printf "+++++++++++++++++++++++++++++++++++\\n"
-    printf " Please choose an option:\\n"
-    printf "   1) Set SSH Directory (Not Implemented)\\n"
-    printf "   2) List Current Loaded Keys\\n"
-    printf "   3) Load Key(s)\\n" # New option 
-    printf "   6) Display Log File Info\\n"
-    printf "   4) Delete Single Key from Agent\\n"
-    printf "   5) Delete All Keys from Agent\\n"
-    printf "   7) Reload Keys\\n" # New option
-    printf "   q) Quit\\n"
-    printf "+++++++++++++++++++++++++++++++++++\\n"
+    printf "\n======= SSH Key Manager Menu =======\n"
+    printf " Platform: %s\n" "$PLATFORM"
+    printf " SSH Directory: %s\n" "$SSH_DIR"
+    printf "+++++++++++++++++++++++++++++++++++\n"
+    printf " Please choose an option:\n"
+    printf "   1) Set SSH Directory\n" # Renamed from (Not Implemented)
+    printf "   2) List Current Loaded Keys\n"
+    printf "   3) Load Specific Key(s)\n"
+    printf "   4) Delete Single Key from Agent\n"
+    printf "   5) Delete All Keys from Agent\n"
+    printf "   6) Reload All Keys (using find)\n" # Was 7
+    printf "   7) Display Log File Info\n"      # Was 6
+    printf "   q) Quit\n"
+    printf "+++++++++++++++++++++++++++++++++++\n"
 }
 
 # --- get_menu_choice ---
@@ -1248,7 +1247,7 @@ delete_single_key() {
     printf "\n+++ Delete Single Key from Agent +++\n"
 
     # First, check if the agent is accessible and has keys using if/else.
-    local agent_check_status list_output
+    local agent_check_status list_output return_status=1 # Default to failure
     if list_output=$(ssh-add -l 2>&1); then
         agent_check_status=0 # Explicitly success
     else
@@ -1256,72 +1255,85 @@ delete_single_key() {
     fi
     log_debug "ssh-add -l status check: $agent_check_status"
 
-    if [ "$agent_check_status" -eq 1 ]; then # No keys loaded
-        printf "No keys currently loaded in ssh-agent to delete.\n"
-        log_info "delete_single_key: No keys loaded, nothing to do."
-        return 0 # Nothing to delete, considered success for this operation.
+    if [ "$agent_check_status" -eq 1 ]; then # Status 1: Often means no agent or no keys
+        # Consistent handling with delete_all_keys
+        log_info "delete_single_key: Could not query agent (ssh-add -l status: 1). Agent might not be running or contains no keys."
+        printf "No active agent found to delete keys from.\n" >&2
+        return_status=1 # Return failure
     elif [ "$agent_check_status" -ne 0 ]; then # Error connecting (status 2 or other)
-        log_error "delete_single_key: Cannot query agent (ssh-add -l status: $agent_check_status)."
+        # Log as warn to avoid generic error message on console
+        log_warn "delete_single_key: Cannot query agent (ssh-add -l status: $agent_check_status)."
         printf "Error: Could not query the SSH agent (status: %d).\n" "$agent_check_status" >&2
-        return 1 # Connection error.
-    fi
+        return_status=1 # Return failure
+    else
+        # Agent has keys (status 0), proceed
+        # Check key count from list_output
+        key_count=$(echo "$list_output" | wc -l)
+        key_count=${key_count##* } # Trim whitespace
+        if [ "$key_count" -eq 0 ]; then
+             # Should not happen if status was 0, but handle defensively
+             log_warn "delete_single_key: ssh-add -l status 0 but no keys listed."
+             printf "No keys currently loaded in ssh-agent to delete.\n"
+             return_status=0 # Treat as success (nothing to do)
+        else
+            # Agent has keys, list them
+            log_info "Agent has keys. Listing potential key files..."
+            if ! update_keys_list_file; then
+                log_error "delete_single_key: Failed to get list of key files."
+                return 1 # Abort if key file listing fails
+            fi
+            if [ ! -s "$KEYS_LIST_TMP" ]; then
+                log_error "delete_single_key: Inconsistency - agent has keys, but temp file list is empty."
+                printf "Error: Inconsistency detected - agent reports keys, but no key files found.\n" >&2
+                return 1 # Abort on inconsistency
+            fi
+            local key_files=()
+            mapfile -t key_files < "$KEYS_LIST_TMP" || { log_error "Failed to read keys into array."; return 1; }
+            if [ ${#key_files[@]} -eq 0 ]; then
+                log_error "delete_single_key: Read 0 keys into array."
+                printf "Error reading key file list.\n" >&2
+                return 1 # Abort if mapfile fails
+            fi
+            printf "Select a key file to remove from the agent:\n"
+            local i choice selected_index selected_filename key_path del_status
+            for i in "${!key_files[@]}"; do
+                printf "  %2d) %s\n" "$((i + 1))" "${key_files[i]}"
+            done
+            while true; do
+                read -r -p "Enter key number to delete (or 'c' to cancel): " choice < /dev/tty
+                log_debug "User entered selection: '$choice'"
+                case "$choice" in
+                    c|C) printf "Operation cancelled.\n"; log_info "User cancelled deletion."; return_status=0; break ;; # Cancellation is success
+                    *) 
+                        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#key_files[@]}" ]; then
+                            selected_index=$((choice - 1))
+                            selected_filename="${key_files[$selected_index]}"
+                            key_path="$SSH_DIR/$selected_filename"
+                            log_info "User selected: $choice ($selected_filename)"
+                            printf "Attempting to delete key file: %s\n" "$selected_filename"
+                            log_info "Attempting: ssh-add -d '$key_path'"
+                            ssh-add -d "$key_path" 2>/dev/null || true # Redirect stderr
+                            del_status=${PIPESTATUS[0]:-$?}
+                            log_debug "ssh-add -d exited with status: $del_status"
+                            if [ "$del_status" -eq 0 ]; then
+                                printf "Key '%s' successfully deleted from agent.\n" "$selected_filename"
+                                log_info "Successfully deleted '$key_path' from agent."
+                                return_status=0 # Successful deletion
+                            else
+                                printf "Error: Failed to delete key '%s' from agent (status: %d).\n" "$selected_filename" "$del_status" >&2
+                                log_error "Failed to delete key '$key_path' (status: $del_status)."
+                                if [ "$del_status" -eq 1 ]; then printf "       (This often means the key wasn't loaded.)\n" >&2; fi
+                                return_status=1 # Deletion failed
+                            fi
+                            break # Exit loop after attempt
+                        else
+                            printf "Invalid selection. Please enter 1-%d or 'c'.\n" "${#key_files[@]}"
+                        fi ;;
+                esac
+            done
+        fi # End key_count check
+    fi # End of agent status check
 
-    # Agent has keys (status 0), proceed
-    log_info "Agent has keys. Listing potential key files..."
-    if ! update_keys_list_file; then
-        log_error "delete_single_key: Failed to get list of key files."
-        # update_keys_list_file prints specific error
-        return 1
-    fi
-    if [ ! -s "$KEYS_LIST_TMP" ]; then
-        log_error "delete_single_key: Inconsistency - agent has keys, but temp file list is empty."
-        printf "Error: Inconsistency detected - agent reports keys, but no key files found.\n" >&2
-        return 1
-    fi
-    local key_files=()
-    mapfile -t key_files < "$KEYS_LIST_TMP" || { log_error "Failed to read keys into array."; return 1; }
-    if [ ${#key_files[@]} -eq 0 ]; then
-        log_error "delete_single_key: Read 0 keys into array."
-        printf "Error reading key file list.\n" >&2
-        return 1
-    fi
-    printf "Select a key file to remove from the agent:\\n"
-    local i choice selected_index selected_filename key_path del_status return_status=1
-    for i in "${!key_files[@]}"; do
-        printf "  %2d) %s\\n" "$((i + 1))" "${key_files[i]}"
-    done
-    while true; do
-        read -r -p "Enter key number to delete (or 'c' to cancel): " choice < /dev/tty
-        log_debug "User entered selection: '$choice'"
-        case "$choice" in
-            c|C) printf "Operation cancelled.\\n"; log_info "User cancelled deletion."; return_status=0; break ;;
-            *)
-                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#key_files[@]}" ]; then
-                    selected_index=$((choice - 1))
-                    selected_filename="${key_files[$selected_index]}"
-                    key_path="$SSH_DIR/$selected_filename"
-                    log_info "User selected: $choice ($selected_filename)"
-                    printf "Attempting to delete key file: %s\n" "$selected_filename"
-                    log_info "Attempting: ssh-add -d '$key_path'"
-                    ssh-add -d "$key_path" 2>/dev/null || true # Redirect stderr
-                    del_status=${PIPESTATUS[0]:-$?}
-                    log_debug "ssh-add -d exited with status: $del_status"
-                    if [ "$del_status" -eq 0 ]; then
-                        printf "Key '%s' successfully deleted from agent.\n" "$selected_filename"
-                        log_info "Successfully deleted '$key_path' from agent."
-                        return_status=0
-                    else
-                        printf "Error: Failed to delete key '%s' from agent (status: %d).\n" "$selected_filename" "$del_status" >&2
-                        log_error "Failed to delete key '$key_path' (status: $del_status)."
-                        if [ "$del_status" -eq 1 ]; then printf "       (This often means the key wasn't loaded.)\n" >&2; fi
-                        return_status=1 # Deletion failed
-                    fi
-                    break # Exit loop after attempt
-                else
-                    printf "Invalid selection. Please enter 1-%d or 'c'.\n" "${#key_files[@]}"
-                fi ;;
-        esac
-    done
     log_debug "Exiting function: ${FUNCNAME[0]} (status: $return_status)"
     return $return_status
 }
@@ -1347,8 +1359,9 @@ delete_all_keys() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     printf "\n+++ Delete All Keys from Agent +++\n"
 
+    local agent_check_status key_count=0 list_output="" return_status=1 # Default to failure
+
     # Check agent status and count keys if possible using if/else for robust status capture.
-    local agent_check_status key_count=0 list_output="" has_keys=0
     if list_output=$(ssh-add -l 2>&1); then
         agent_check_status=0 # Explicitly success
     else
@@ -1356,60 +1369,52 @@ delete_all_keys() {
     fi
     log_debug "ssh-add -l status check: $agent_check_status"
 
-    if [ "$agent_check_status" -eq 0 ]; then # Status 0: Keys are present.
+    if [ "$agent_check_status" -eq 0 ]; then # Status 0: Agent reachable, check key count
         key_count=$(echo "$list_output" | wc -l)
         key_count=${key_count##* } # Trim whitespace from wc output.
-        log_debug "Agent check status 0, counted $key_count keys."
-        if [ "$key_count" -gt 0 ]; then
-             has_keys=1
+        log_debug "Agent query successful (status 0), counted $key_count keys."
+
+        if [ "$key_count" -eq 0 ]; then
+            printf "No keys currently loaded in ssh-agent.\n"
+            log_info "delete_all_keys: No keys loaded, nothing to do."
+            return_status=0 # No keys to delete is considered success for this operation.
         else
-             # Should not happen if status was 0, but handle defensively.
-             log_warn "delete_all_keys: ssh-add -l status 0 but key count is 0."
-             has_keys=0
+            # Keys are present, proceed with confirmation
+            printf "This will delete all %d keys from ssh-agent.\n" "$key_count"
+            local confirm
+            read -r -p "Are you sure you want to continue? (y/N): " confirm < /dev/tty
+            log_debug "User confirmation: '$confirm'"
+
+            case "$confirm" in
+                y|Y)
+                    log_info "User confirmed deletion of all keys."
+                    if delete_keys_from_agent; then
+                        return_status=0 # Success reported by underlying function
+                    else
+                        return_status=1 # Failure reported by underlying function
+                    fi
+                    ;;
+                *)
+                    printf "Operation cancelled.\n"
+                    log_info "User cancelled deletion."
+                    return_status=0 # Cancelled successfully
+                    ;;
+            esac
         fi
-    elif [ "$agent_check_status" -eq 1 ]; then # Status 1: No keys loaded.
-        log_info "delete_all_keys: No keys loaded in agent (status 1)."
-        has_keys=0
+
+    elif [ "$agent_check_status" -eq 1 ]; then # Status 1: Often means no agent or no keys
+        log_info "delete_all_keys: Could not query agent (ssh-add -l status: 1). Agent might not be running or contains no keys." # Log as info
+        printf "Either no active agent exists OR active agent contains no keys to delete.\n" >&2 # Specific user message
+        return_status=1
     elif [ "$agent_check_status" -eq 2 ]; then # Status 2: Cannot connect.
-        log_error "delete_all_keys: Cannot query agent (ssh-add -l status: 2)."
-        printf "Error: Could not query the SSH agent (status: %d).\n" "$agent_check_status" >&2
-        return 1 # Connection error.
+        log_warn "delete_all_keys: Cannot connect to agent (ssh-add -l status: 2)." # Log as warn
+        printf "Error: Could not connect to the SSH agent (ssh-add -l status: 2).\n" >&2 # Specific user message
+        return_status=1
     else # Other errors.
-        log_error "delete_all_keys: Error querying agent (ssh-add -l status: $agent_check_status)."
-        printf "Error: Could not query the SSH agent (Status: %d).\n" "$agent_check_status" >&2
-        return 1 # Other agent error.
+        log_warn "delete_all_keys: Error querying agent (ssh-add -l status: $agent_check_status)." # Log as warn
+        printf "Error: Could not query the SSH agent (Status: %d).\n" "$agent_check_status" >&2 # Specific user message
+        return_status=1
     fi
-
-    # If no keys are loaded, inform the user and exit successfully.
-    if [ "$has_keys" -eq 0 ]; then
-        printf "No keys currently loaded in ssh-agent.\n"
-        log_info "delete_all_keys: No keys loaded, nothing to do."
-        return 0
-    fi
-
-    # Keys are present, proceed with confirmation
-    printf "This will delete all %d keys from ssh-agent.\n" "$key_count"
-    local confirm del_status return_status=1
-    read -r -p "Are you sure you want to continue? (y/N): " confirm < /dev/tty
-    log_debug "User confirmation: '$confirm'"
-
-    # Process confirmation.
-    case "$confirm" in
-        y|Y)
-            log_info "User confirmed deletion of all keys."
-            if delete_keys_from_agent; then
-                return_status=0 # Success reported by underlying function
-            else
-                return_status=1 # Failure reported by underlying function
-                # Error message already printed/logged by delete_keys_from_agent
-            fi
-            ;;
-        *)
-            printf "Operation cancelled.\n"
-            log_info "User cancelled deletion."
-            return_status=0 # Cancelled successfully
-            ;;
-    esac
 
     log_debug "Exiting function: ${FUNCNAME[0]} (status: $return_status)"
     return $return_status
@@ -1561,7 +1566,8 @@ run_delete_all_cli() {
 
     # Initial checks.
     if ! validate_ssh_dir; then exit 1; fi
-    if ! ensure_ssh_agent; then exit 1; fi # Agent required for deletion.
+    # Do NOT ensure agent here. Let delete_all_keys handle the check.
+    # if ! ensure_ssh_agent; then exit 1; fi # Agent required for deletion.
 
     # Call the function that handles confirmation and deletion.
     delete_all_keys
@@ -1717,33 +1723,28 @@ run_interactive_menu() {
         choice=$(get_menu_choice)
         log_info "User selected menu option: [$choice]"
         case "$choice" in
-            1)  # Set SSH Directory (Placeholder)
-                # printf "Set SSH Directory functionality not yet implemented.\n"
-                # log_warn "Option 1 (Set SSH Directory) selected but not implemented."
+            1)  # Set SSH Directory
                 log_debug "Main loop - Case 1: Calling set_ssh_directory..."
-                set_ssh_directory
+                set_ssh_directory || true # Allow failure without exiting menu
                 wait_for_key ;;
-            2)  # List Keys (Was 2)
+            2)  # List Keys
                 log_debug "Main loop - Case 2: Calling _perform_list_keys_check..."
-                _perform_list_keys_check || true
+                _perform_list_keys_check || true # Allow failure (e.g., no agent) without exiting menu
                 wait_for_key ;;
-            3)  # Load Specific Key(s) (Was 7)
+            3)  # Load Specific Key(s)
                 log_debug "Main loop - Case 3: Calling load_specific_keys..."
-                load_specific_keys || true # Ignore return status here to ensure wait_for_key runs
+                load_specific_keys || true # Allow failure without exiting menu
                 wait_for_key ;;
-            4)  # Delete Single Key (Was 5)
+            4)  # Delete Single Key
                 log_debug "Main loop - Case 4: Calling delete_single_key..."
-                delete_single_key
+                delete_single_key || true # Allow failure without exiting menu
                 wait_for_key ;;
-            5)  # Delete All Keys (Was 6)
+            5)  # Delete All Keys
                 log_debug "Main loop - Case 5: Calling delete_all_keys..."
-                delete_all_keys
+                delete_all_keys || true # Allow failure (e.g., no agent) without exiting menu
                 wait_for_key ;;
-            6)  # Display Log Location (Was 4)
-                log_debug "Main loop - Case 6: Calling display_log_location..."
-                display_log_location
-                wait_for_key ;;
-            7)  # Reload All Keys (using find) (Was 3)
+            6)  # Reload All Keys (using find)
+                # This case already uses set +e / set -e internally
                 printf "\n--- Reload All Keys (using find) ---\n"
                 log_info "Menu: Reloading all keys selected (uses find -> delete -> add)."
                 # Ensure agent required for delete/add
@@ -1797,12 +1798,18 @@ run_interactive_menu() {
                 fi
 
                 set -e # Re-enable exit on error *before* waiting
-                wait_for_key
+                wait_for_key 
+                ;; 
+            7)  # Display Log Location
+                log_debug "Main loop - Case 6: Calling display_log_location..."
+                display_log_location # This function should always succeed
+                wait_for_key 
                 ;; # End case 7 (Reload)
             q|Q) # Quit
                 log_info "User selected Quit from menu."
                 printf "\nThank you for using SSH Key Manager. Goodbye!\n"
-                exit 0 ;;
+                exit 0 
+                ;;
             *) # Should not happen
                 log_error "Main loop - Reached unexpected default case for choice: $choice"
                 printf "Error: Unexpected menu choice processed!\n" >&2
