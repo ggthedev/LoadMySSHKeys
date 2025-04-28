@@ -47,7 +47,7 @@ The main `sshkeymanager.sh` script now primarily acts as an entry point that sou
 
 ## Requirements
 
-- Bash shell (version 4.0 or higher recommended for `mapfile`).
+- Bash shell (version 4.0 or higher recommended for `mapfile`). **IMPORTANT: This script relies on features available in Bash 4.0 and later. Ensure your environment uses a compatible Bash version.**
 - Standard Unix utilities (`find`, `basename`, `wc`, `mkdir`, `touch`, `chmod`, `grep`, `date`, `ps`, `rm`, `mv`, `seq`, `sleep`, `dirname`).
 - SSH tools installed (`ssh-add`, `ssh-agent`).
 - Write permissions to log directory.

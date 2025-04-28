@@ -217,7 +217,7 @@ ensure_ssh_agent() {
         if [ -n "$file_agent_pid" ] && [ -n "$file_agent_sock" ] && _is_agent_live "$file_agent_pid" "$file_agent_sock"; then
             # Agent from file is live! Export vars and set flag.
             log_info "Agent details from file '$AGENT_ENV_FILE' are valid and agent is live."
-            printf "Successfully connected to existing ssh-agent (PID: %s, Socket: %s).\n" "$file_agent_pid" "$file_agent_sock"
+            log_info "Successfully connected to existing ssh-agent (PID: $file_agent_pid, Socket: $file_agent_sock)."
             export SSH_AUTH_SOCK="$file_agent_sock"
             export SSH_AGENT_PID="$file_agent_pid"
             agent_found_valid=true

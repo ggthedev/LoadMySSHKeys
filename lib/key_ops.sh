@@ -284,68 +284,61 @@ delete_keys_from_agent() {
 
 # --- load_specific_keys ---
 #
-# @description Interactively prompts the user to select one or more key files
-#              from a list of potential keys found in $SSH_DIR and attempts
-#              to add the selected keys to the ssh-agent using `ssh-add`.
+# @description Presents a menu of potential private keys found in $SSH_DIR
+#              (based on the contents of $KEYS_LIST_TMP) and allows the user
+#              to select one or more keys to add to the ssh-agent.
 # @arg        None
-# @requires   Global variable $SSH_DIR must point to a readable directory.
-# @requires   Global variable $KEYS_LIST_TMP must be a writable path for temp file.
-# @requires   An accessible ssh-agent must be running (ensured via ensure_ssh_agent).
-# @modifies   Adds selected keys to the running ssh-agent.
-# @modifies   Overwrites the temporary file $KEYS_LIST_TMP via update_keys_list_file.
-# @return     0 If the operation was cancelled by the user OR if at least one selected key
-#               was successfully added to the agent.
-# @return     1 If there's an error ensuring the agent is running, finding/listing key files,
-#               reading user input, validating selection, or if *all* attempts to add
-#               selected keys failed.
-# @prints     A numbered list of potential key files, prompts for user input,
-#             and status messages about the addition attempts to stdout/stderr.
-# @reads      User input from /dev/tty for selection.
-# @stdout     Menu/list of keys, prompts, success/failure messages per key, summary.
-# @stderr     Error messages (e.g., agent unavailable, no keys found, invalid input).
-# @depends    Global variables: SSH_DIR, KEYS_LIST_TMP.
-#             Functions: ensure_ssh_agent, update_keys_list_file, log_debug, log_info,
-#             log_error, log_warn.
+# @requires   Global variable $KEYS_LIST_TMP must point to a readable file
+#             containing potential key basenames.
+# @requires   Global variable $SSH_DIR must point to the directory containing keys.
+# @requires   An accessible ssh-agent must be running.
+# @return     0 If the user successfully selects and adds at least one key.
+# @return     1 If no keys are found, the user cancels, or all selected keys fail to add.
+# @prints     Interactive menu and selection prompts to stdout/stderr.
+# @stdout     Menu, prompts, status messages.
+# @stderr     Error messages.
+# @depends    Global variables: KEYS_LIST_TMP, SSH_DIR.
+#             Functions: log_debug, log_info, log_error, log_warn, add_keys_to_agent.
 #             External command: ssh-add, mapfile (bash 4+), read, printf, uname, wc.
 # ---
 load_specific_keys() {
     log_debug "Entering function: ${FUNCNAME[0]}"
 
-    printf "\n+++ Load Specific Key(s) into Agent +++\n"
-
-    # 1. Get List of Potential Keys
-    #    Scan the SSH directory and populate the temporary list file.
-    log_info "Scanning '$SSH_DIR' for potential key files..."
-    if ! update_keys_list_file; then
-        # update_keys_list_file logs errors and prints messages if no keys found or error occurs.
-        log_error "load_specific_keys: Failed to get list of key files from '$SSH_DIR'."
-        return 1 # Failure: Cannot list keys.
-    fi
-    # Double-check if the temporary file is actually non-empty after update_keys_list_file reported success (status 0).
-    if [ ! -s "$KEYS_LIST_TMP" ]; then
-        log_error "load_specific_keys: update_keys_list_file succeeded but the temp file '$KEYS_LIST_TMP' is empty. Cannot proceed."
-        printf "Error: No potential key files were found in %s to select from.\n" "$SSH_DIR" >&2
-        return 1 # Failure: No keys available to select.
+    # Check if the temporary key list file exists and is readable.
+    if [ ! -r "$KEYS_LIST_TMP" ]; then
+        log_error "Temporary key list file '$KEYS_LIST_TMP' not found or not readable."
+        printf "Error: Cannot find the list of potential keys ('%s'). Run option to find keys first?\n" "$KEYS_LIST_TMP" >&2
+        return 1
     fi
 
-    # 2. Read Key List into Array
-    #    Use mapfile (bash 4+) for safer reading of filenames (handles spaces, etc.)
     local key_files=()
-    mapfile -t key_files < "$KEYS_LIST_TMP" || {
-        log_error "Failed to read key filenames from temporary file '$KEYS_LIST_TMP' into array.";
-        printf "Error reading temporary key list file.\n" >&2;
-        return 1; # Failure: Cannot read temp file.
-    }
-
-    # Check if mapfile actually read any keys.
-    if [ ${#key_files[@]} -eq 0 ]; then
-        log_error "load_specific_keys: Read 0 keys into array from '$KEYS_LIST_TMP'."
-        printf "Error reading key file list or list was unexpectedly empty after read.\n" >&2
-        return 1 # Failure: Array is empty.
+    # Conditional mapfile vs while loop
+    if [[ ${BASH_VERSINFO[0]} -ge 4 ]]; then
+        # Use mapfile (bash 4+) for safer reading of filenames (handles spaces, etc.)
+        log_debug "load_specific_keys: Using mapfile (Bash 4+) to read keys from $KEYS_LIST_TMP"
+        mapfile -t key_files < "$KEYS_LIST_TMP" || {
+            log_error "Failed to read key list from '$KEYS_LIST_TMP' using mapfile."
+            printf "Error: Failed to read key list file ('%s').\n" "$KEYS_LIST_TMP" >&2
+            return 1
+        }
+    else
+        # Use while read loop for Bash 3 compatibility
+        log_debug "load_specific_keys: Using while read loop (Bash 3 compatibility) to read keys from $KEYS_LIST_TMP"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            key_files+=("$line")
+        done < "$KEYS_LIST_TMP"
+        # Check read status? Difficult to robustly check inside the loop like mapfile's || { ... }
     fi
-    log_debug "Read ${#key_files[@]} key basenames into array."
 
-    # 3. Display List and Get User Selection
+    # Check if any keys were actually read.
+    if [ ${#key_files[@]} -eq 0 ]; then
+        log_info "No potential key files found in the list ('$KEYS_LIST_TMP')."
+        printf "No potential key files found to load.\n"
+        return 1
+    fi
+
+    # --- Display Menu for Key Selection ---
+    printf "\n+++ Load Specific Key(s) into Agent +++\n"
     printf "Available potential key files in %s:\n" "$SSH_DIR"
     local i
     # Loop through the array indices to print a numbered list.
@@ -511,247 +504,213 @@ load_specific_keys() {
 
 # --- list_current_keys ---
 #
-# @description Attempts to list the keys currently loaded in the ssh-agent
-#              using `ssh-add -l`. Handles different exit codes and provides
-#              user-friendly messages and context-specific hints.
+# @description Executes `ssh-add -l` to list keys currently loaded in the agent.
+#              Formats the output with numbering for better readability.
 # @arg        None
-# @requires   An accessible ssh-agent (implicitly required by ssh-add -l).
-# @return     0 If keys were listed successfully OR if the agent reported no keys
-#               were loaded (status 1 from ssh-add -l is treated as success here).
-# @return     1 If there was an error connecting to the agent (status 2) or another
-#               unexpected error occurred during the listing attempt.
-# @prints     The list of keys (if any) or messages indicating no keys or errors.
-#             Context-specific hints are printed if no keys are loaded.
-# @stdout     Formatted list of keys, or "No keys loaded" message.
-# @stderr     Error messages (e.g., connection failure), Hint messages.
-# @depends    Global variable: ACTION, SSH_DIR.
-#             Functions: log_debug, log_info, log_error, log_warn.
+# @requires   An accessible ssh-agent must be running.
+# @return     0 If `ssh-add -l` executes successfully (even if no keys are loaded).
+# @return     Non-zero (typically 1 or 2) if `ssh-add -l` fails (e.g., agent not running).
+# @prints     Numbered list of loaded keys to stdout, or a message if no keys
+#             are loaded or if the agent connection fails.
+# @stdout     Formatted list of keys or status messages.
+# @stderr     Error message if `ssh-add` command fails.
+# @depends    Global variable: ACTION. Functions: log_debug, log_info, log_warn, log_error.
 #             External command: ssh-add, mapfile (bash 4+), printf.
 # ---
 list_current_keys() {
     log_debug "Entering function: ${FUNCNAME[0]}"
     log_info "Attempting to list current keys in agent using \`ssh-add -l\`..."
 
-    # Execute `ssh-add -l`. Capture stdout and stderr together (2>&1).
-    # Use `if/else` with direct command execution to robustly capture exit status even with `set -e`.
-    local key_list_output exit_code
-    if key_list_output=$(ssh-add -l 2>&1); then
-        exit_code=0 # Explicitly set success status.
-    else
-        exit_code=$? # Capture the actual failure exit status.
+    local ssh_add_output ssh_add_status
+    # Execute ssh-add -l, capturing output and allowing failure.
+    set +e
+    ssh_add_output=$(ssh-add -l 2>&1)
+    ssh_add_status=$?
+    set -e
+
+    log_debug "\`ssh-add -l\` exit status: $ssh_add_status"
+    if [ "$ssh_add_status" -ne 0 ]; then
+        log_debug "\`ssh-add -l\` output/error: $ssh_add_output"
     fi
-    log_debug "\`ssh-add -l\` command finished with exit status: $exit_code"
 
-    # --- Handle ssh-add -l Exit Status ---
-    case $exit_code in
-        0) # Success: Keys are present and were listed.
-            printf "Keys currently loaded in the agent:\n"
-            log_info "Keys currently loaded in the agent according to \`ssh-add -l\`:\n$key_list_output"
-            local key_lines=()
-            # Read the output lines into an array using mapfile.
-            mapfile -t key_lines <<< "$key_list_output"
-            # Check if mapfile actually populated the array.
-            if [ ${#key_lines[@]} -gt 0 ]; then
-                local i
-                # Print a numbered list of the keys.
-                for i in "${!key_lines[@]}"; do
-                    printf "  %2d) %s\n" "$((i + 1))" "${key_lines[i]}"
-                    # No need to log each line again here, already logged the block above.
-                done
-            else
-                # This case should ideally not happen if exit_code was 0, but handle defensively.
-                printf "Warning: Agent reported success (status 0), but no key lines were parsed.\n"
-                log_warn "list_current_keys: \`ssh-add -l\` status was 0, but mapfile found no lines in output: '$key_list_output'"
+    # --- Process ssh-add Output ---
+    if [ "$ssh_add_status" -eq 0 ]; then
+        # Command succeeded, keys were listed (or none were present).
+        printf "Keys currently loaded in the agent:\n"
+        # Use mapfile (Bash 4+) or while loop (Bash 3) to handle multi-line output safely.
+        local key_lines=()
+        if [[ ${BASH_VERSINFO[0]} -ge 4 ]]; then
+             # Use mapfile (Bash 4+)
+             log_debug "list_current_keys: Using mapfile (Bash 4+) to parse ssh-add -l output"
+             mapfile -t key_lines <<< "$ssh_add_output"
+             # Check if mapfile actually populated the array.
+             if [ ${#key_lines[@]} -eq 0 ]; then
+                 # This case shouldn't happen if status is 0 and output isn't empty, but handle defensively.
+                 log_warn "list_current_keys: \`ssh-add -l\` status was 0, but mapfile found no lines in output: '$ssh_add_output'"
+                 printf "  (No keys currently loaded)\n"
+                 # Log the raw output and the fact that no keys were found in the list.
+                 log_info "Keys currently loaded in the agent according to \`ssh-add -l\`:\n(No keys currently loaded)"
+             else
+                 # Print numbered list.
+                 local i=0
+                 for line in "${key_lines[@]}"; do
+                     printf "  %d) %s\n" $((++i)) "$line"
+                 done
+                 # Log the raw output as INFO for record-keeping.
+                 log_info "Keys currently loaded in the agent according to \`ssh-add -l\`:\n$ssh_add_output"
+             fi
+        else
+             # Use while read loop (Bash 3)
+             log_debug "list_current_keys: Using while read loop (Bash 3 compatibility) to parse ssh-add -l output"
+             local i=0
+             while IFS= read -r line || [[ -n "$line" ]]; do
+                 key_lines+=("$line") # Store lines if needed later, otherwise just print
+                 printf "  %d) %s\n" $((++i)) "$line"
+             done <<< "$ssh_add_output"
+             # Check if the loop ran at least once.
+             if [ $i -eq 0 ]; then
+                 printf "  (No keys currently loaded)\n"
+                 log_info "Keys currently loaded in the agent according to \`ssh-add -l\`:\n(No keys currently loaded)"
+             else
+                 # Log the raw output as INFO for record-keeping.
+                 log_info "Keys currently loaded in the agent according to \`ssh-add -l\`:\n$ssh_add_output"
             fi
-            ;;
-        1) # Status 1: Standard exit code when the agent is running but contains no keys.
-           # Treat this as a successful query, just reporting the state.
-            printf "No keys currently loaded in the agent.\n"
-            log_info "\`ssh-add -l\` reported no keys currently loaded (status 1)."
-            # Provide a helpful hint based on the context (CLI action vs menu).
-            if [ "${ACTION:-menu}" == "list" ]; then
-                # Hint specific to the CLI `list` action.
-                printf "Hint: Use '-a' to automatically find and add keys from '%s'.\n" "$SSH_DIR" >&2
-            else
-                # Default hint for menu or other contexts.
-                printf "Hint: Use menu option 3 ('Load Specific Key(s)') to load keys from '%s'.\n" "$SSH_DIR" >&2
-            fi
-            ;;
-        2) # Status 2: Error connecting to the agent.
-            log_error "\`ssh-add -l\` failed (status 2): Could not connect to the SSH agent."
-            printf "Error: Could not connect to the SSH agent. Is it running?\n" >&2
-            return 1 # Indicate failure.
-            ;;
-        *) # Other unexpected errors.
-            log_error "\`ssh-add -l\` failed with unexpected status: $exit_code."
-            printf "Error: An unexpected error occurred while checking keys in agent (Code: %s).\n" "$exit_code" >&2
-            return 1 # Indicate failure.
-            ;;
-    esac
-
-    log_debug "Exiting function: ${FUNCNAME[0]} (Overall Status: 0 - Handled or Success)"
-    return 0 # Return success (0) for status 0 and 1, failure (1) for others.
+        fi
+        return 0 # Success
+    elif [[ "$ssh_add_output" == *"The agent has no identities."* ]]; then
+        # Specific message indicating agent is running but empty.
+        printf "Keys currently loaded in the agent:\n  (No keys currently loaded)\n"
+        log_info "Agent is running but contains no identities."
+        return 0 # Treat as success (agent communication worked).
+    else
+        # Command failed for other reasons (e.g., agent not running).
+        log_error "Failed to list keys. \`ssh-add -l\` failed with status $ssh_add_status. Output: $ssh_add_output"
+        # Provide a user-friendly hint based on the likely cause.
+        local hint="Hint: Ensure agent is running and accessible (check SSH_AUTH_SOCK)."
+        if [[ "$ACTION" != "menu" ]]; then # Give CLI users a hint about the menu.
+             hint="Hint: Ensure agent is running. You might need to start the menu ('$(basename "$0") --menu') or add keys first ('-a', '-f')."
+        fi
+        printf "Error: Could not list keys from agent (status: %d).\n%s\n" "$ssh_add_status" "$hint" >&2
+        return $ssh_add_status # Return the error status from ssh-add.
+    fi
 }
 
 
 # --- delete_single_key ---
 #
-# @description Interactively prompts the user to select a key file (from a list
-#              of potential keys found in $SSH_DIR) and attempts to delete that
-#              specific key from the ssh-agent using `ssh-add -d <key_path>`.
+# @description Presents a menu of potential private keys found in $SSH_DIR
+#              (based on the contents of $KEYS_LIST_TMP) and allows the user
+#              to select one key to delete from the ssh-agent using `ssh-add -d`.
 # @arg        None
-# @requires   Global variable $SSH_DIR must point to a readable directory.
-# @requires   Global variable $KEYS_LIST_TMP must be a writable path for temp file.
-# @requires   An accessible ssh-agent (checked via ssh-add -l).
-# @modifies   Removes the selected key from the running ssh-agent.
-# @modifies   Overwrites the temporary file $KEYS_LIST_TMP via update_keys_list_file.
-# @return     0 If the operation was cancelled by the user OR if the selected key
-#               was successfully deleted OR if there were no keys to delete initially.
-# @return     1 If there's an error connecting to the agent, finding/listing key files,
-#               reading user input, or if the `ssh-add -d` command fails.
-# @prints     A numbered list of potential key files, prompts for user input,
-#             and status messages about the deletion attempt to stdout/stderr.
-# @reads      User input from /dev/tty for selection.
-# @stdout     Menu/list of keys, prompts, success/failure/cancellation messages.
-# @stderr     Error messages (e.g., connection failure, deletion failure).
-# @depends    Global variables: SSH_DIR, KEYS_LIST_TMP.
-#             Functions: update_keys_list_file, log_debug, log_info, log_error, log_warn.
+# @requires   Global variable $KEYS_LIST_TMP must point to a readable file
+#             containing potential key basenames.
+# @requires   Global variable $SSH_DIR must point to the directory containing keys.
+# @requires   An accessible ssh-agent must be running.
+# @return     0 If the user successfully selects and deletes a key.
+# @return     1 If no keys are found, the user cancels, the selected key is invalid,
+#               or the `ssh-add -d` command fails.
+# @prints     Interactive menu and selection prompts to stdout/stderr.
+# @stdout     Menu, prompts, status messages.
+# @stderr     Error messages.
+# @depends    Global variables: KEYS_LIST_TMP, SSH_DIR.
+#             Functions: log_debug, log_info, log_error, log_warn.
 #             External command: ssh-add, mapfile (bash 4+), read, printf, wc, echo.
 # ---
 delete_single_key() {
     log_debug "Entering function: ${FUNCNAME[0]}"
-    printf "\n--- Delete Single Key from Agent ---\n"
+    log_info "Attempting to delete a single key interactively..."
 
-    # 1. Check Agent Status and Key Presence (using ssh-add -l directly)
-    local agent_check_status list_output return_status=1 # Default to failure
-    if list_output=$(ssh-add -l 2>&1); then
-        agent_check_status=0 # Command succeeded (agent running, might have keys or be empty).
-    else
-        agent_check_status=$? # Capture failure status (1=no keys, 2=no agent, etc.)
+    # Check if the temporary key list file exists and is readable.
+    if [ ! -r "$KEYS_LIST_TMP" ]; then
+        log_error "Temporary key list file '$KEYS_LIST_TMP' not found or not readable."
+        printf "Error: Cannot find the list of potential keys ('%s'). Run option to find/load keys first?\n" "$KEYS_LIST_TMP" >&2
+        return 1
     fi
-    log_debug "Initial \`ssh-add -l\` check status: $agent_check_status"
 
-    # --- Handle Initial Agent Check Result ---
-    if [ "$agent_check_status" -eq 1 ]; then
-        # Status 1: Agent running but no keys, or possibly agent not running (depends on ssh-add version).
-        # Treat this consistently: inform user no keys/agent found for deletion.
-        log_info "delete_single_key: \`ssh-add -l\` reported no keys or could not query agent (status: 1)."
-        printf "No keys currently loaded in the agent (or agent not running) to delete from.\n" >&2
-        return_status=0 # Consider this success (nothing to do).
-    elif [ "$agent_check_status" -ne 0 ]; then
-        # Status 2 or other error: Failed to connect to agent.
-        log_warn "delete_single_key: Cannot query agent to list keys (\`ssh-add -l\` status: $agent_check_status)."
-        printf "Error: Could not query the SSH agent (status: %d). Cannot proceed with deletion.\n" "$agent_check_status" >&2
-        return_status=1 # Failure: Cannot connect.
+    # Use mapfile (Bash 4+) or while loop (Bash 3) to read potential keys.
+    local key_files=()
+    if [[ ${BASH_VERSINFO[0]} -ge 4 ]]; then
+        log_debug "delete_single_key: Using mapfile (Bash 4+) to read keys from $KEYS_LIST_TMP"
+        mapfile -t key_files < "$KEYS_LIST_TMP" || {
+            log_error "Failed to read key list from '$KEYS_LIST_TMP' using mapfile."
+            printf "Error: Failed to read key list file ('%s').\n" "$KEYS_LIST_TMP" >&2
+            return 1
+        }
     else
-        # Status 0: Agent running and has keys. Proceed to list and prompt.
-        # Count keys from the output.
-        local key_count
-        key_count=$(echo "$list_output" | wc -l)
-        key_count=${key_count##* } # Trim whitespace.
-        log_debug "Agent query successful (\`ssh-add -l\` status 0), found $key_count keys listed."
+        log_debug "delete_single_key: Using while read loop (Bash 3 compatibility) to read keys from $KEYS_LIST_TMP"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            key_files+=("$line")
+        done < "$KEYS_LIST_TMP"
+    fi
 
-        if [ "$key_count" -eq 0 ]; then
-             # Should not happen if status was 0, but handle defensively.
-             log_warn "delete_single_key: \`ssh-add -l\` status 0 but no keys were counted from output: '$list_output'"
-             printf "No keys currently loaded in ssh-agent to delete.\n"
-             return_status=0 # Success: Nothing to do.
-        else
-            # Agent has keys, list potential *files* to allow user selection.
-            # Note: We list files from disk, not directly keys from agent, as `ssh-add -d` needs the file path.
-            log_info "Agent has $key_count key(s) loaded. Listing potential key *files* from '$SSH_DIR' for deletion selection..."
-            # Regenerate the list of potential key files on disk.
-            if ! update_keys_list_file; then
-                log_error "delete_single_key: Failed to get list of potential key files from '$SSH_DIR'. Cannot proceed."
-                # update_keys_list_file prints messages if no files found.
-                return 1 # Failure: Cannot get file list.
-            fi
-            # Check if the temp file exists and is non-empty.
-            if [ ! -s "$KEYS_LIST_TMP" ]; then
-                # This indicates an inconsistency: agent has keys, but we found no matching files on disk?
-                log_error "delete_single_key: Inconsistency - agent reports keys, but update_keys_list_file found no potential key files in '$SSH_DIR' (temp file '$KEYS_LIST_TMP' is empty)."
-                printf "Error: Inconsistency detected - agent reports keys, but no potential key files found on disk.\n" >&2
-                return 1 # Failure: Inconsistent state.
-            fi
+    local key_count=${#key_files[@]}
+    if [ "$key_count" -eq 0 ]; then
+        log_info "No potential key files found in the list ('$KEYS_LIST_TMP'). Cannot delete."
+        printf "No potential key files found to delete.\n"
+        return 1
+    fi
 
-            # Read the list of potential key files into an array.
-            local key_files=()
-            mapfile -t key_files < "$KEYS_LIST_TMP" || {
-                 log_error "Failed to read key filenames from temporary file '$KEYS_LIST_TMP' into array.";
-                 printf "Error reading temporary key list file.\n" >&2;
-                 return 1;
-            }
-            if [ ${#key_files[@]} -eq 0 ]; then
-                log_error "delete_single_key: Read 0 keys into array from '$KEYS_LIST_TMP'."
-                printf "Error reading key file list or list was unexpectedly empty after read.\n" >&2
-                return 1
-            fi
+    # --- Display Menu for Key Selection ---
+    printf "\n--- Delete Single Key from Agent ---\n"
+    printf "Select a key file to remove from the agent (corresponding identity will be removed):\n"
+    local i choice selected_index selected_filename key_path del_status
+    # Print numbered list of files found on disk.
+    for i in "${!key_files[@]}"; do
+        printf "  %2d) %s\n" "$((i + 1))" "${key_files[i]}"
+    done
 
-            # 2. Display List and Get User Selection
-            printf "Select a key file to remove from the agent (corresponding identity will be removed):\n"
-            local i choice selected_index selected_filename key_path del_status
-            # Print numbered list of files found on disk.
-            for i in "${!key_files[@]}"; do
-                printf "  %2d) %s\n" "$((i + 1))" "${key_files[i]}"
-            done
+    # Loop until valid input or cancellation.
+    while true; do
+        read -r -p "Enter key number to delete (or 'c' to cancel): " choice < /dev/tty
+        log_debug "User entered deletion selection: '$choice'"
+        case "$choice" in
+            c|C)
+                # User cancelled.
+                printf "Operation cancelled.\n"
+                log_info "User cancelled single key deletion."
+                return 0 # Cancellation is considered success.
+                ;;
+            *)
+                # Validate the user's choice.
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#key_files[@]}" ]; then
+                    # Valid number within range.
+                    selected_index=$((choice - 1)) # Convert to 0-based index.
+                    selected_filename="${key_files[$selected_index]}"
+                    key_path="$SSH_DIR/$selected_filename"
+                    log_info "User selected key file #$choice: '$selected_filename' for deletion from agent."
+                    printf "Attempting to delete identity corresponding to key file: %s\n" "$selected_filename"
 
-            # Loop until valid input or cancellation.
-            while true; do
-                read -r -p "Enter key number to delete (or 'c' to cancel): " choice < /dev/tty
-                log_debug "User entered deletion selection: '$choice'"
-                case "$choice" in
-                    c|C)
-                        # User cancelled.
-                        printf "Operation cancelled.\n"
-                        log_info "User cancelled single key deletion."
-                        return_status=0 # Cancellation is considered success.
-                        break ;; # Exit the while loop.
-                    *)
-                        # Validate the user's choice.
-                        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#key_files[@]}" ]; then
-                            # Valid number within range.
-                            selected_index=$((choice - 1)) # Convert to 0-based index.
-                            selected_filename="${key_files[$selected_index]}"
-                            key_path="$SSH_DIR/$selected_filename"
-                            log_info "User selected key file #$choice: '$selected_filename' for deletion from agent."
-                            printf "Attempting to delete identity corresponding to key file: %s\n" "$selected_filename"
+                    # 3. Attempt Deletion
+                    log_info "Executing: ssh-add -d '$key_path'"
+                    # Execute `ssh-add -d` with the key file path. Redirect stderr to /dev/null.
+                    ssh-add -d "$key_path" 2>/dev/null || true
+                    del_status=${PIPESTATUS[0]:-$?} # Capture exit status.
+                    log_debug "\`ssh-add -d '$key_path'\` finished with status: $del_status"
 
-                            # 3. Attempt Deletion
-                            log_info "Executing: ssh-add -d '$key_path'"
-                            # Execute `ssh-add -d` with the key file path. Redirect stderr to /dev/null.
-                            ssh-add -d "$key_path" 2>/dev/null || true
-                            del_status=${PIPESTATUS[0]:-$?} # Capture exit status.
-                            log_debug "\`ssh-add -d '$key_path'\` finished with status: $del_status"
-
-                            # --- Handle ssh-add -d Exit Status ---
-                            if [ "$del_status" -eq 0 ]; then
-                                # Status 0: Success.
-                                printf "Identity corresponding to key '%s' successfully deleted from agent.\n" "$selected_filename"
-                                log_info "Successfully deleted identity for '$key_path' from agent."
-                                return_status=0 # Success.
-                            else
-                                # Status non-zero: Failure.
-                                printf "Error: Failed to delete identity for key '%s' from agent (ssh-add -d status: %d).\n" "$selected_filename" "$del_status" >&2
-                                log_error "Failed to delete identity for key '$key_path' from agent (status: $del_status)."
-                                # Provide hint for common failure cause (status 1).
-                                if [ "$del_status" -eq 1 ]; then
-                                    printf "       (This often means the identity wasn't loaded or the key file path is incorrect.)\n" >&2
-                                    log_warn "ssh-add -d status 1 may indicate identity wasn't loaded."
-                                fi
-                                return_status=1 # Failure.
-                            fi
-                            break # Exit the while loop after attempt.
-                        else
-                            # Invalid input (not a number or out of range).
-                            printf "Invalid selection. Please enter a number between 1 and %d, or 'c' to cancel.\n" "${#key_files[@]}"
-                        fi ;;
-                esac
-            done # End while loop for user input.
-        fi # End if key_count > 0.
-    fi # End of initial agent status check.
-
-    log_debug "Exiting function: ${FUNCNAME[0]} (Overall status: $return_status)"
-    return $return_status
+                    # --- Handle ssh-add -d Exit Status ---
+                    if [ "$del_status" -eq 0 ]; then
+                        # Status 0: Success.
+                        printf "Identity corresponding to key '%s' successfully deleted from agent.\n" "$selected_filename"
+                        log_info "Successfully deleted identity for '$key_path' from agent."
+                        return 0 # Success.
+                    else
+                        # Status non-zero: Failure.
+                        printf "Error: Failed to delete identity for key '%s' from agent (ssh-add -d status: %d).\n" "$selected_filename" "$del_status" >&2
+                        log_error "Failed to delete identity for key '$key_path' from agent (status: $del_status)."
+                        # Provide hint for common failure cause (status 1).
+                        if [ "$del_status" -eq 1 ]; then
+                            printf "       (This often means the identity wasn't loaded or the key file path is incorrect.)\n" >&2
+                            log_warn "ssh-add -d status 1 may indicate identity wasn't loaded."
+                        fi
+                        return 1 # Failure.
+                    fi
+                    break # Exit the while loop after attempt.
+                else
+                    # Invalid input (not a number or out of range).
+                    printf "Invalid selection. Please enter a number between 1 and %d, or 'c' to cancel.\n" "${#key_files[@]}"
+                fi ;;
+        esac
+    done # End while loop for user input.
 }
 
 
