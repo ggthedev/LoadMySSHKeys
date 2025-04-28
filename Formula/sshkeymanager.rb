@@ -4,8 +4,8 @@
 class Sshkeymanager < Formula
   desc "SSH key management tool with a menu driven interface as well as a CLI interface"
   homepage "https://github.com/ggthedev/SSHKEYSMANAGER"
-  url "https://github.com/ggthedev/SSHKEYSMANAGER/archive/refs/tags/v0.0.1.2.tar.gz"
-  sha256 "0c6c1178b564812d8bdcb0c05052c25903a6f3f7a2296105fcc738127778d7fb"
+  url "https://github.com/ggthedev/SSHKEYSMANAGER/archive/refs/tags/v0.0.1.3.tar.gz"
+  sha256 "d6c730c129a6b0b86152e002a449c077c7977aaacbc65b06bc4049826dbc53c5"
   license "BSD-3-Clause"
   head "https://github.com/ggthedev/SSHKEYSMANAGER.git", branch: "main"
 
