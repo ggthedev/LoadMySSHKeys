@@ -731,7 +731,7 @@ delete_keys_from_agent() {
         0) # Success: Keys were deleted.
             log_info "All keys successfully deleted from agent."
             printf "All keys successfully deleted from agent.\\n"
-            return 0
+        return 0
             ;;
         1) # Common "error": No identities found in the agent.
             log_info "No keys found in agent to delete (ssh-add -D status: 1)."
@@ -742,7 +742,7 @@ delete_keys_from_agent() {
         2) # Error: Could not connect to the agent.
             log_error "Failed to delete keys: Could not connect to agent (ssh-add -D status: 2)."
             printf "Error: Could not connect to the SSH agent.\\n" >&2
-            return 1
+        return 1
             ;;
         *) # Other unexpected errors.
             log_error "Failed to delete keys from agent (ssh-add -D status: $del_status)."
@@ -902,7 +902,7 @@ load_specific_keys() {
         if [ ! -f "$key_path" ]; then
             printf "  ✗ Error: Key file '%s' selected but not found at '%s'.\n" "$selected_filename" "$key_path" >&2
             log_error "Key file disappeared after listing: '$key_path'"
-            ((failed_count++))
+                ((failed_count++))
             continue
         fi
 
@@ -1784,7 +1784,7 @@ run_interactive_menu() {
                 fi
 
                 log_info "Deleting existing keys before adding..."
-                delete_keys_from_agent
+                    delete_keys_from_agent
 
                 log_info "Adding keys found by find (from list $VALID_KEY_LIST_FILE)..."
                 if [ -s "$VALID_KEY_LIST_FILE" ]; then
@@ -1927,7 +1927,7 @@ main() {
     local FIRST_ACTION_SET=0 # Initialize flag for simple parser action tracking
 
     # --- Setup Logging FIRST ---
-    if ! setup_logging; then
+if ! setup_logging; then
         printf "Warning: Logging setup failed. Continuing with logging disabled.\n" >&2
     fi
     # Log script start marker *after* setup_logging attempt
@@ -1947,26 +1947,26 @@ main() {
         eval set -- "$ARGS"
         while true; do
             case "$1" in
-                -l|--list)
-                    ACTION="list"
+        -l|--list)
+            ACTION="list"
                     shift ;;
-                -a|--add)
-                    ACTION="add"
+        -a|--add)
+            ACTION="add"
                     shift ;;
-                -f|--file)
+        -f|--file)
                     ACTION="file"; source_key_file="$2"
                     shift 2 ;;
-                -D|--delete-all)
-                    ACTION="delete-all"
+        -D|--delete-all)
+            ACTION="delete-all"
                     shift ;;
-                -m|--menu)
-                    ACTION="menu"
+        -m|--menu)
+            ACTION="menu"
                     shift ;;
-                -v|--verbose)
-                    IS_VERBOSE="true"
+        -v|--verbose)
+            IS_VERBOSE="true"
                     shift ;;
-                -h|--help)
-                    ACTION="help"
+        -h|--help)
+            ACTION="help"
                     parse_error=0
                     shift ;;
                 --)
@@ -2027,9 +2027,9 @@ main() {
                         printf "Error: Unknown option '%s'\n\n" "$arg" >&2
                     fi
                     ACTION="help"; parse_error=1; break
-                ;;
-            esac
-        done
+            ;;
+    esac
+done
     fi
 
     # --- Runtime Initialization (Post-Parsing) ---
@@ -2058,26 +2058,26 @@ main() {
     # --- Dispatch Action ---
     log_info "Selected action: $ACTION"
 
-    case $ACTION in
-        list)
+case $ACTION in
+    list)
              run_list_keys ;;
-        add)
+    add)
              run_load_keys ;;
-        file)
+    file)
             run_load_keys_from_file "$source_key_file" ;;
-        delete-all)
+    delete-all)
             run_delete_all_cli ;;
-        menu)
+    menu)
             run_interactive_menu ;;
-        help|*)
-             display_help
+    help|*)
+        display_help
             if [ "$parse_error" -eq 1 ]; then
                 exit 1
             else
                 exit 0
             fi
-            ;;
-    esac
+        ;;
+esac
 
     # This point should ideally not be reached
     log_error "Critical Error: Script main function reached end unexpectedly after dispatching action: $ACTION."
