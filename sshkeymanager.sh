@@ -65,21 +65,8 @@ declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"               # Fallback log director
 declare LOG_DIR=""
 
 # Platform Detection & Platform-Specific Settings
-declare PLATFORM
-PLATFORM=$(uname -s) # Detect Operating System (e.g., "Darwin", "Linux").
-declare STAT_CMD     # Command to get file size (differs between platforms).
-case "$PLATFORM" in
-    "Darwin")
-        STAT_CMD="stat -f %z" # macOS stat command for size in bytes.
-        ;;
-    "Linux")
-        STAT_CMD="stat -c %s" # Linux stat command for size in bytes.
-        ;;
-    *)
-        # Default to Linux style for other *nix systems, might need adjustment.
-        STAT_CMD="stat -c %s"
-        ;;
-esac
+# Call the function sourced from lib/helpers.sh
+setup_platform_vars # Sets $PLATFORM and $STAT_CMD
 
 # Core Application Paths
 declare SSH_DIR="${SKM_SSH_DIR:-$HOME/.ssh}" # SSH directory path. Env override: SKM_SSH_DIR.
