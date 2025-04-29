@@ -57,7 +57,7 @@ _sa_script_start_time=${_sa_script_start_time:-$(date +%s.%N)}
 # Handle the case where BASH_SOURCE might be empty (e.g., if script is piped)
 # Using a default directory of '.' if detection fails
 declare SCRIPT_DIR
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]:-$0}" )" &> /dev/null && pwd )
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" &>/dev/null && pwd)
 
 # --- Set Platform Variable ---
 declare PLATFORM
@@ -72,9 +72,9 @@ declare IS_VERBOSE="false"
 # --- Configuration Variables ---
 # These variables define key locations used throughout the script.
 
-declare SSH_DIR="$HOME/.ssh"                                         # Standard SSH directory
-declare AGENT_ENV_FILE="$HOME/.config/sshkeymanager/agent.env"       # File to store/read agent connection details
-declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeymanager/ssh_keys_list"  # Persistent file to cache list of valid key *basenames*
+declare SSH_DIR="$HOME/.ssh"                                            # Standard SSH directory
+declare AGENT_ENV_FILE="$HOME/.config/sshkeymanager/agent.env"          # File to store/read agent connection details
+declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeymanager/ssh_keys_list" # Persistent file to cache list of valid key *basenames*
 
 # --- Log File Configuration Variables ---
 # Define standard names and potential directory locations for the log file.
@@ -84,7 +84,7 @@ declare LOG_FILENAME="sshkeymanager.log"
 declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeymanager"
 declare LOG_DIR_LINUX_VAR="/var/log/sshkeymanager"
 declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeymanager"
-declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"                             # Fallback if others fail
+declare LOG_DIR_FALLBACK="$HOME/.ssh/logs" # Fallback if others fail
 
 # --- Logging Setup ---
 # Logging setup is now handled by setup_logging() from lib/logging.sh
@@ -106,13 +106,13 @@ declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"                             # Fallbac
 #   1. Checks if the persistent key list file exists.
 #   2. (Commented out) Optionally remove the file (`rm -f`).
 _sa_cleanup() {
-  # Use parameter expansion default to handle potentially unset variable with set -u
-  if [ -n "${VALID_KEY_LIST_FILE:-}" ] && [ -f "${VALID_KEY_LIST_FILE:-}" ]; then
-    # Decide if we should remove the persistent list file on exit?
-    # For now, let's keep it as it caches the valid keys found.
-    # log_debug "_sa_cleanup: Removing key list file $VALID_KEY_LIST_FILE"
-    : # No cleanup needed for the persistent file
-  fi
+    # Use parameter expansion default to handle potentially unset variable with set -u
+    if [ -n "${VALID_KEY_LIST_FILE:-}" ] && [ -f "${VALID_KEY_LIST_FILE:-}" ]; then
+        # Decide if we should remove the persistent list file on exit?
+        # For now, let's keep it as it caches the valid keys found.
+        # log_debug "_sa_cleanup: Removing key list file $VALID_KEY_LIST_FILE"
+        : # No cleanup needed for the persistent file
+    fi
 } # END _sa_cleanup
 
 # Function: _sa_log_execution_time
@@ -139,7 +139,7 @@ _sa_log_execution_time() {
         log_debug "_sa_log_execution_time: End time captured: ${_sa_end_time}"
 
         # Use bc for floating point calculation if available
-        if command -v bc > /dev/null; then
+        if command -v bc >/dev/null; then
             log_debug "_sa_log_execution_time: Found 'bc'. Attempting calculation: ${_sa_end_time} - ${_sa_script_start_time}"
             _sa_script_duration=$(echo "$_sa_end_time - $_sa_script_start_time" | bc -l)
             local bc_status=$?
@@ -156,15 +156,15 @@ _sa_log_execution_time() {
             log_warn "'bc' command not found, attempting fallback to integer seconds."
             # Fallback to integer seconds using parameter expansion (more portable)
             local _sa_start_seconds _sa_end_seconds
-             _sa_start_seconds=${_sa_script_start_time%%.*}
-             _sa_end_seconds=${_sa_end_time%%.*}
-             log_debug "_sa_log_execution_time: Fallback seconds: Start=$_sa_start_seconds, End=$_sa_end_seconds"
-             if [[ -n "$_sa_start_seconds" && -n "$_sa_end_seconds" ]]; then
-                 _sa_script_duration=$((_sa_end_seconds - _sa_start_seconds))
-                 log_info "Total setup script execution time: ${_sa_script_duration} seconds."
-             else
-                 log_error "_sa_log_execution_time: Failed to parse integer seconds for fallback calculation."
-             fi
+            _sa_start_seconds=${_sa_script_start_time%%.*}
+            _sa_end_seconds=${_sa_end_time%%.*}
+            log_debug "_sa_log_execution_time: Fallback seconds: Start=$_sa_start_seconds, End=$_sa_end_seconds"
+            if [[ -n "$_sa_start_seconds" && -n "$_sa_end_seconds" ]]; then
+                _sa_script_duration=$((_sa_end_seconds - _sa_start_seconds))
+                log_info "Total setup script execution time: ${_sa_script_duration} seconds."
+            else
+                log_error "_sa_log_execution_time: Failed to parse integer seconds for fallback calculation."
+            fi
         fi
     else
         log_warn "_sa_log_execution_time: Could not calculate execution time: start time variable (_sa_script_start_time) not found."
@@ -191,7 +191,7 @@ _sa_log_execution_time() {
 #   5. Returns 0 if keys found and written, 1 otherwise.
 _sa_write_valid_key_basenames_to_file() {
     trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u # Enable strict mode for this function
+    set -u             # Enable strict mode for this function
 
     local target_file="$1"
     log_debug "_sa_write_valid_key_basenames_to_file: Entering function. Target file: '$target_file'"
@@ -240,8 +240,8 @@ _sa_write_valid_key_basenames_to_file() {
         else
             log_debug "_sa_write_valid_key_basenames_to_file:   No matching .pub file found at '$pub_filepath'. Skipping."
         fi
-    # Use find to get basenames of files not ending in .pub
-    # Ensure find operates directly in SSH_DIR to avoid path issues with basename
+        # Use find to get basenames of files not ending in .pub
+        # Ensure find operates directly in SSH_DIR to avoid path issues with basename
     done < <(find "$SSH_DIR" -maxdepth 1 -type f ! -name '*.pub' -exec basename {} \;)
 
     log_debug "_sa_write_valid_key_basenames_to_file: Finished checking candidates."
@@ -249,10 +249,10 @@ _sa_write_valid_key_basenames_to_file() {
     if [ ${#valid_key_basenames[@]} -eq 0 ]; then
         log_info "_sa_write_valid_key_basenames_to_file: No private keys with corresponding .pub files found in $SSH_DIR. Clearing target file."
         # Clear the target file even if no keys are found
-        if ! :> "$target_file"; then # Using :> for truncation, safer than > potentially
-             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
-             # set +u # Disable strict mode before returning - Handled by trap
-             return 1
+        if ! : >"$target_file"; then # Using :> for truncation, safer than > potentially
+            log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
+            # set +u # Disable strict mode before returning - Handled by trap
+            return 1
         fi
         chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
         # set +u # Disable strict mode before returning - Handled by trap
@@ -261,17 +261,17 @@ _sa_write_valid_key_basenames_to_file() {
         log_info "_sa_write_valid_key_basenames_to_file: Found ${#valid_key_basenames[@]} private key file(s). Writing to '$target_file'..."
 
         # Clear the target file first
-        if ! :> "$target_file"; then
-             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
-             # set +u # Disable strict mode before returning - Handled by trap
-             return 1
+        if ! : >"$target_file"; then
+            log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
+            # set +u # Disable strict mode before returning - Handled by trap
+            return 1
         fi
         chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
 
         # Write the array elements one per line to the file
         local basename
         for basename in "${valid_key_basenames[@]}"; do
-            echo "$basename" >> "$target_file"
+            echo "$basename" >>"$target_file"
             if [ $? -ne 0 ]; then
                 log_error "_sa_write_valid_key_basenames_to_file: Failed to write basename '$basename' to '$target_file'."
                 # Optionally decide whether to abort or continue
@@ -304,7 +304,7 @@ _sa_write_valid_key_basenames_to_file() {
 #      are considered successful communication. Status 2 or higher indicates failure.
 _sa_check_ssh_agent() {
     trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u # Enable strict mode for this function
+    set -u             # Enable strict mode for this function
 
     log_debug "_sa_check_ssh_agent: Checking agent status... (PID='${SSH_AGENT_PID:-}', SOCK='${SSH_AUTH_SOCK:-}')"
     if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
@@ -319,14 +319,14 @@ _sa_check_ssh_agent() {
         return 1
     fi
     # Check if the agent process is running
-    if ! ps -p "$SSH_AGENT_PID" > /dev/null 2>&1; then
+    if ! ps -p "$SSH_AGENT_PID" >/dev/null 2>&1; then
         log_error "_sa_check_ssh_agent: SSH_AGENT_PID ($SSH_AGENT_PID) process not running."
         # set +u # Disable strict mode before returning - Handled by trap
         return 1
     fi
     # Check communication with the agent
     # Use ssh-add -l, allow status 1 (no keys) as successful communication
-    ssh-add -l > /dev/null 2>&1 || true
+    ssh-add -l >/dev/null 2>&1 || true
     local check_status=${PIPESTATUS[0]:-$?}
     log_debug "_sa_check_ssh_agent: ssh-add -l communication status: $check_status"
     if [ "$check_status" -eq 0 ] || [ "$check_status" -eq 1 ]; then
@@ -337,7 +337,7 @@ _sa_check_ssh_agent() {
     log_error "_sa_check_ssh_agent: Cannot communicate with agent (ssh-add -l status $check_status)."
     # set +u # Disable strict mode before returning - Handled by trap
     return 1 # Failure
-} # END _sa_check_ssh_agent
+}            # END _sa_check_ssh_agent
 
 # Function: _sa_ensure_ssh_agent
 # Purpose: Ensures a valid ssh-agent is running and its environment variables
@@ -372,7 +372,7 @@ _sa_check_ssh_agent() {
 #      g. Return success (0) or failure (1) based on verification.
 _sa_ensure_ssh_agent() {
     trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u # Enable strict mode for this function
+    set -u             # Enable strict mode for this function
 
     log_debug "_sa_ensure_ssh_agent: Entering function."
 
@@ -456,7 +456,7 @@ _sa_ensure_ssh_agent() {
         printf 'SSH_AUTH_SOCK=%s; export SSH_AUTH_SOCK;\n' "$new_sock"
         printf 'SSH_AGENT_PID=%s; export SSH_AGENT_PID;\n' "$new_pid"
         printf '# Agent started on %s by %s\n' "$(date)" "$(basename "$0")"
-    } > "$AGENT_ENV_FILE"
+    } >"$AGENT_ENV_FILE"
     if ! chmod 600 "$AGENT_ENV_FILE"; then log_warn "_sa_ensure_ssh_agent: Failed to set permissions on $AGENT_ENV_FILE"; fi
     log_debug "_sa_ensure_ssh_agent: Agent environment saved."
 
@@ -507,7 +507,7 @@ _sa_ensure_ssh_agent() {
 #      - 2+ (Connection error or other failure): Logs error, returns 1.
 _sa_add_keys_to_agent() {
     trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u # Enable strict mode for this function
+    set -u             # Enable strict mode for this function
 
     log_debug "_sa_add_keys_to_agent: Entering function (single call version)."
     log_info "_sa_add_keys_to_agent: Preparing to add keys listed in $VALID_KEY_LIST_FILE..."
@@ -540,7 +540,7 @@ _sa_add_keys_to_agent() {
             log_warn "_sa_add_keys_to_agent: Key file '$keyfile' listed but not found at '$key_path'. Skipping."
             ((invalid_path_count++))
         fi
-    done < "$VALID_KEY_LIST_FILE"
+    done <"$VALID_KEY_LIST_FILE"
 
     if [ ${#key_paths_to_add[@]} -eq 0 ]; then
         log_warn "_sa_add_keys_to_agent: No valid key file paths found to add after reading list."
@@ -579,7 +579,7 @@ _sa_add_keys_to_agent() {
         log_debug "_sa_add_keys_to_agent: Exiting function (status: 0 - partial success treated as OK for setup)."
         # set +u # Disable strict mode before returning - Handled by trap
         return 0 # Treat partial success as OK for setup purposes
-    else # Status 2 or other errors
+    else         # Status 2 or other errors
         log_error "_sa_add_keys_to_agent: ssh-add failed (status: $ssh_add_status). Could not add keys."
         log_error "ssh-add output (if any): $ssh_add_output"
         log_debug "_sa_add_keys_to_agent: Exiting function (status: 1 - failure)."
@@ -627,36 +627,36 @@ _sa_add_keys_to_agent() {
 #  12. Disables `set -u` and returns status.
 sa_setup() {
     # set -u # Enable strict mode for this function - MOVED to be after setup_logging
-    # 
+    #
     # log_debug "sa_setup: Main setup function invoked." # Cannot log before setup
 
-    # --- Argument Parsing --- 
+    # --- Argument Parsing ---
     local key_list_source_file=""
     local arg
     # We need IS_VERBOSE potentially set BEFORE setup_logging
     # so parse args first.
     for arg in "$@"; do
         case "$arg" in
-            -v|--verbose)
-                IS_VERBOSE="true"
-                # log_debug "Verbose logging enabled by argument." # Cannot log yet
-                shift # Consume the argument
-                ;;
-            -*) 
-                # log_warn "Unknown option ignored: $arg" # Cannot log yet
-                shift # Consume the argument
-                ;;
-            *)
-                # Assume the first non-option argument is the key list file
-                if [ -z "$key_list_source_file" ]; then
-                    key_list_source_file="$arg"
-                    # log_info "Key list source file specified: $key_list_source_file" # Cannot log yet
-                else
-                    # log_warn "Ignoring additional argument: $arg" # Cannot log yet
-                    :
-                fi
-                shift # Consume the argument
-                ;;
+        -v | --verbose)
+            IS_VERBOSE="true"
+            # log_debug "Verbose logging enabled by argument." # Cannot log yet
+            shift # Consume the argument
+            ;;
+        -*)
+            # log_warn "Unknown option ignored: $arg" # Cannot log yet
+            shift # Consume the argument
+            ;;
+        *)
+            # Assume the first non-option argument is the key list file
+            if [ -z "$key_list_source_file" ]; then
+                key_list_source_file="$arg"
+                # log_info "Key list source file specified: $key_list_source_file" # Cannot log yet
+            else
+                # log_warn "Ignoring additional argument: $arg" # Cannot log yet
+                :
+            fi
+            shift # Consume the argument
+            ;;
         esac
     done
 
@@ -668,7 +668,7 @@ sa_setup() {
     # printf "DEBUG_TERM: LOG_FILE after setup_logging: [%s]\n" "${LOG_FILE:-UNSET}" >&2 # DEBUG Removed
 
     # --- Enable Strict Mode (Now safe to log errors if it fails) ---
-    set -u 
+    set -u
 
     # --- Log Script Start and Config (Now safe) ---
     _log_marker "_______<=:START:=> SSH Agent Setup Script______"
@@ -718,4 +718,4 @@ sa_setup() {
 
 # --- Auto-Execution Trigger ---
 # Call the main setup function, passing any arguments provided during sourcing.
-sa_setup "$@" 
+sa_setup "$@"

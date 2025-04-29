@@ -6,10 +6,10 @@
 
 # Path to the script under test (relative to this test file)
 SCRIPT_UNDER_TEST="$BATS_TEST_DIRNAME/../sshkeymanager.sh"
-TEST_TEMP_DIR="" # Will be set in setup
-MOCK_BIN_DIR=""  # Path to mock executables
-MOCK_HOME_DIR="" # Path to mock home directory
-MOCK_SSH_DIR=""  # Path to mock .ssh directory
+TEST_TEMP_DIR=""              # Will be set in setup
+MOCK_BIN_DIR=""               # Path to mock executables
+MOCK_HOME_DIR=""              # Path to mock home directory
+MOCK_SSH_DIR=""               # Path to mock .ssh directory
 MOCK_AGENT_KEYS_STATE_FILE="" # Path to file tracking mock agent keys
 
 # Store agent PID globally for teardown
@@ -64,7 +64,7 @@ setup() {
         exit 1
     fi
 
-    # --- Manually parse output instead of eval --- 
+    # --- Manually parse output instead of eval ---
     local sock_line pid_line parsed_agent_sock parsed_agent_pid
     sock_line=$(echo "$agent_output" | grep '^SSH_AUTH_SOCK=')
     pid_line=$(echo "$agent_output" | grep '^SSH_AGENT_PID=')
@@ -77,7 +77,7 @@ setup() {
     # Example: SSH_AGENT_PID=12345; export SSH_AGENT_PID;
     # Use parameter expansion for PID to avoid issues with semicolon in cut
     temp_pid="${pid_line#SSH_AGENT_PID=}" # Remove prefix 'SSH_AGENT_PID='
-    parsed_agent_pid="${temp_pid%%;*}"     # Remove the first semicolon and everything after it
+    parsed_agent_pid="${temp_pid%%;*}"    # Remove the first semicolon and everything after it
 
     if [ -z "$parsed_agent_sock" ] || [ -z "$parsed_agent_pid" ]; then
         echo "Failed to parse ssh-agent output! Output was:" >&3
@@ -87,23 +87,29 @@ setup() {
     echo "Agent parsed: PID=$parsed_agent_pid SOCK=$parsed_agent_sock" >&3
 
     # Save PID and SOCK path for teardown / run_script
-    echo "$parsed_agent_pid" > "$AGENT_PID_FILE"
-    echo "$parsed_agent_sock" > "$AGENT_SOCK_FILE"
+    echo "$parsed_agent_pid" >"$AGENT_PID_FILE"
+    echo "$parsed_agent_sock" >"$AGENT_SOCK_FILE"
 
     # Save agent env file for the script to potentially source
     {
-      echo "SSH_AUTH_SOCK='$parsed_agent_sock'; export SSH_AUTH_SOCK;"
-      echo "SSH_AGENT_PID=$parsed_agent_pid; export SSH_AGENT_PID;"
-    } > "$agent_env_file"
+        echo "SSH_AUTH_SOCK='$parsed_agent_sock'; export SSH_AUTH_SOCK;"
+        echo "SSH_AGENT_PID=$parsed_agent_pid; export SSH_AGENT_PID;"
+    } >"$agent_env_file"
 
     # Generate test key files dynamically in mock SSH dir
     echo "Generating test keys in $MOCK_SSH_DIR..." >&3
-    ssh-keygen -t rsa -b 2048 -N '' -f "$MOCK_SSH_DIR/test_rsa" -q <<< y || { echo "Failed to generate test_rsa key" >&3; exit 1; }
-    ssh-keygen -t ed25519 -N '' -f "$MOCK_SSH_DIR/test_ed25519" -q <<< y || { echo "Failed to generate test_ed25519 key" >&3; exit 1; }
+    ssh-keygen -t rsa -b 2048 -N '' -f "$MOCK_SSH_DIR/test_rsa" -q <<<y || {
+        echo "Failed to generate test_rsa key" >&3
+        exit 1
+    }
+    ssh-keygen -t ed25519 -N '' -f "$MOCK_SSH_DIR/test_ed25519" -q <<<y || {
+        echo "Failed to generate test_ed25519 key" >&3
+        exit 1
+    }
 
     # Add some other files to test filtering logic
-    echo "some other file" > "$MOCK_SSH_DIR/known_hosts"
-    echo "key without pub" > "$MOCK_SSH_DIR/no_pub_key"
+    echo "some other file" >"$MOCK_SSH_DIR/known_hosts"
+    echo "key without pub" >"$MOCK_SSH_DIR/no_pub_key"
 
     # Export agent vars for subsequent 'run' commands within tests
     # Note: export in setup applies to the main bats process env
@@ -137,7 +143,7 @@ teardown() {
 # --- Test Cases ---
 
 @test "1. CLI: No arguments should display help and exit 0" {
-    run_script # No arguments
+    run_script          # No arguments
     [ "$status" -eq 0 ] # Check exit status using $status
     # Check for key phrases in the output using $output
     [[ "$output" == *"Usage: sshkeymanager.sh [OPTIONS]"* ]]
@@ -199,7 +205,7 @@ teardown() {
     [ -f "$internal_list" ]
     grep -q "^test_rsa$" "$internal_list"
     grep -q "^test_ed25519$" "$internal_list"
-    [ $(wc -l < "$internal_list") -eq 2 ]
+    [ $(wc -l <"$internal_list") -eq 2 ]
 
     # Check log file
     local log_file="$TEST_TEMP_DIR/logs/sshkeymanager.log"
@@ -215,7 +221,7 @@ teardown() {
     # --- Setup specific state for this test ---
     # Run the '-a' command first to populate the real agent via ssh-add
     echo "Running prerequisite: sshkeymanager.sh -a" >&3
-    run_script -a > /dev/null
+    run_script -a >/dev/null
     [ "$status" -eq 0 ] # Ensure prerequisite '-a' succeeded
 
     # --- Now run the actual test command ---
@@ -239,4 +245,4 @@ teardown() {
     grep -q "INFO: Keys currently loaded in the agent according to \`ssh-add -l\`" "$log_file"
 }
 
-# Add more test cases here... 
+# Add more test cases here...

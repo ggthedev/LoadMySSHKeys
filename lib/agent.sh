@@ -104,7 +104,7 @@ _start_new_agent() {
     fi
     log_debug "ssh-agent -s output captured."
 
-    # --- Parse ssh-agent output --- 
+    # --- Parse ssh-agent output ---
     local parsed_agent_sock parsed_agent_pid
     local sock_line pid_line temp_sock temp_pid
 
@@ -112,12 +112,15 @@ _start_new_agent() {
     sock_line=$(echo "$agent_output" | grep '^SSH_AUTH_SOCK=')
     pid_line=$(echo "$agent_output" | grep '^SSH_AGENT_PID=')
 
-    temp_sock="${sock_line#SSH_AUTH_SOCK=}" ; parsed_agent_sock="${temp_sock%%;*}"
-    parsed_agent_sock="${parsed_agent_sock#\'}" ; parsed_agent_sock="${parsed_agent_sock%\'}"
+    temp_sock="${sock_line#SSH_AUTH_SOCK=}"
+    parsed_agent_sock="${temp_sock%%;*}"
+    parsed_agent_sock="${parsed_agent_sock#\'}"
+    parsed_agent_sock="${parsed_agent_sock%\'}"
 
-    temp_pid="${pid_line#SSH_AGENT_PID=}" ; parsed_agent_pid="${temp_pid%%;*}"
+    temp_pid="${pid_line#SSH_AGENT_PID=}"
+    parsed_agent_pid="${temp_pid%%;*}"
 
-    # --- Export Parsed Variables --- 
+    # --- Export Parsed Variables ---
     if [ -n "$parsed_agent_sock" ] && [ -n "$parsed_agent_pid" ]; then
         export SSH_AUTH_SOCK="$parsed_agent_sock"
         export SSH_AGENT_PID="$parsed_agent_pid"
@@ -147,7 +150,7 @@ _start_new_agent() {
         echo "# Saved on $(date)"
         echo "SSH_AUTH_SOCK='$SSH_AUTH_SOCK'; export SSH_AUTH_SOCK;"
         echo "SSH_AGENT_PID=$SSH_AGENT_PID; export SSH_AGENT_PID;"
-    } > "$AGENT_ENV_FILE"; then
+    } >"$AGENT_ENV_FILE"; then
         log_error "Failed to write agent environment to '$AGENT_ENV_FILE'. Check permissions."
         # Agent is running, but persistence failed. Return success but log error.
         return 0 # Still usable for this session, but log the error.
@@ -193,7 +196,7 @@ ensure_ssh_agent() {
         return 1
     fi
 
-    # --- Primary Logic: Check the persistent file --- 
+    # --- Primary Logic: Check the persistent file ---
     log_debug "Checking persistent agent file: $AGENT_ENV_FILE"
     local agent_found_valid=false
 
@@ -206,10 +209,13 @@ ensure_ssh_agent() {
         sock_line=$(grep '^SSH_AUTH_SOCK=' "$AGENT_ENV_FILE")
         pid_line=$(grep '^SSH_AGENT_PID=' "$AGENT_ENV_FILE")
 
-        temp_sock="${sock_line#SSH_AUTH_SOCK=}" ; file_agent_sock="${temp_sock%%;*}"
-        file_agent_sock="${file_agent_sock#\'}" ; file_agent_sock="${file_agent_sock%\'}"
+        temp_sock="${sock_line#SSH_AUTH_SOCK=}"
+        file_agent_sock="${temp_sock%%;*}"
+        file_agent_sock="${file_agent_sock#\'}"
+        file_agent_sock="${file_agent_sock%\'}"
 
-        temp_pid="${pid_line#SSH_AGENT_PID=}" ; file_agent_pid="${temp_pid%%;*}"
+        temp_pid="${pid_line#SSH_AGENT_PID=}"
+        file_agent_pid="${temp_pid%%;*}"
 
         log_debug "Parsed from file: PID='$file_agent_pid', SOCK='$file_agent_sock'"
 
@@ -229,11 +235,11 @@ ensure_ssh_agent() {
             # agent_found_valid remains false
         fi
     else
-         log_info "Persistent agent file '$AGENT_ENV_FILE' not found."
-         # agent_found_valid remains false
+        log_info "Persistent agent file '$AGENT_ENV_FILE' not found."
+        # agent_found_valid remains false
     fi
 
-    # --- Action based on validation result and mode --- 
+    # --- Action based on validation result and mode ---
     if [[ "$agent_found_valid" == true ]]; then
         log_debug "ensure_ssh_agent: Existing valid agent confirmed. Returning success."
         return 0 # Success: Valid agent found and loaded.
@@ -272,4 +278,4 @@ ensure_ssh_agent() {
 
 # ==============================================================================
 # --- End of Library ---
-# ============================================================================== 
+# ==============================================================================

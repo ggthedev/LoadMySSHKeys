@@ -82,20 +82,20 @@ get_menu_choice() {
     local choice
     while true; do
         # Prompt user for input, reading directly from the terminal.
-        read -r -p "Enter choice [1-7, q]: " choice < /dev/tty
+        read -r -p "Enter choice [1-7, q]: " choice </dev/tty
         log_debug "User entered selection: '$choice'"
         # Validate the input against allowed choices.
         case "$choice" in
-            [1-7]|q|Q)
-                # Valid choice entered. Echo it for command substitution and return success.
-                echo "$choice"
-                return 0
-                ;;
-            *)
-                # Invalid choice. Print error message and log warning. Loop continues.
-                printf "Invalid choice '%s'. Please try again.\n" "$choice" >&2
-                log_warn "Invalid menu choice: '$choice'"
-                ;;
+        [1-7] | q | Q)
+            # Valid choice entered. Echo it for command substitution and return success.
+            echo "$choice"
+            return 0
+            ;;
+        *)
+            # Invalid choice. Print error message and log warning. Loop continues.
+            printf "Invalid choice '%s'. Please try again.\n" "$choice" >&2
+            log_warn "Invalid menu choice: '$choice'"
+            ;;
         esac
     done
 }
@@ -142,7 +142,7 @@ set_ssh_directory() {
 
     local new_dir_input new_dir_resolved
     # Read user input directly from TTY.
-    read -r -p "> " new_dir_input < /dev/tty
+    read -r -p "> " new_dir_input </dev/tty
 
     # Handle cancellation (empty input).
     if [ -z "$new_dir_input" ]; then
@@ -161,9 +161,9 @@ set_ssh_directory() {
         log_debug "Resolved path from '~/' to: '$new_dir_resolved'"
     # Check if path is exactly '~'
     elif [[ "$new_dir_input" == "~" ]]; then
-         # Replace '~' with the value of $HOME.
-         new_dir_resolved="$HOME"
-         log_debug "Resolved path from '~' to: '$new_dir_resolved'"
+        # Replace '~' with the value of $HOME.
+        new_dir_resolved="$HOME"
+        log_debug "Resolved path from '~' to: '$new_dir_resolved'"
     else
         # Path does not start with tilde, use it as is.
         new_dir_resolved="$new_dir_input"
@@ -235,14 +235,14 @@ display_log_location() {
             # Extract the size field (typically 5th field) from ls output.
             # Redirect stderr of ls to hide "No such file or directory" if it disappears racefully.
             log_size_human=$(ls -lh "$LOG_FILE" 2>/dev/null | awk '{print $5}')
-             # If awk fails or ls fails, log_size_human might be empty or invalid.
+            # If awk fails or ls fails, log_size_human might be empty or invalid.
             if [ -z "$log_size_human" ]; then
-                 log_warn "Could not parse size from ls -lh output for $LOG_FILE"
-                 log_size_human="(Size unavailable)"
+                log_warn "Could not parse size from ls -lh output for $LOG_FILE"
+                log_size_human="(Size unavailable)"
             fi
         else
-             log_warn "Log file $LOG_FILE not found when trying to get size."
-             log_size_human="(File not found)"
+            log_warn "Log file $LOG_FILE not found when trying to get size."
+            log_size_human="(File not found)"
         fi
         # Display the determined size.
         printf "Current log file size: %s\n" "$log_size_human"
@@ -286,7 +286,6 @@ _perform_list_keys_check() {
     return $list_status # Return the status from list_current_keys.
 }
 
-
 # --- run_interactive_menu ---
 #
 # @description Main loop for the interactive menu mode. Displays the menu,
@@ -324,135 +323,138 @@ run_interactive_menu() {
 
         # Handle the user's choice.
         case "$choice" in
-            1)  # Set SSH Directory
-                log_debug "Main loop - Case 1: Calling set_ssh_directory..."
-                # Call function, ignore return status (|| true) for menu flow.
-                set_ssh_directory || true
-                wait_for_key # Pause before redisplaying menu.
-                ;;
-            2)  # List Keys
-                log_debug "Main loop - Case 2: Calling _perform_list_keys_check..."
-                _perform_list_keys_check || true # Helper now calls ensure_ssh_agent "check"
+        1) # Set SSH Directory
+            log_debug "Main loop - Case 1: Calling set_ssh_directory..."
+            # Call function, ignore return status (|| true) for menu flow.
+            set_ssh_directory || true
+            wait_for_key # Pause before redisplaying menu.
+            ;;
+        2) # List Keys
+            log_debug "Main loop - Case 2: Calling _perform_list_keys_check..."
+            _perform_list_keys_check || true # Helper now calls ensure_ssh_agent "check"
+            wait_for_key
+            ;;
+        3) # Load Specific Key(s)
+            log_debug "Main loop - Case 3: Ensuring agent (mode: load) before calling load_specific_keys..."
+            if ensure_ssh_agent "load"; then
+                load_specific_keys || true
+            else
+                log_error "Menu: Failed to ensure agent is ready for loading specific keys."
+                printf "Error: Agent could not be started or connected. Cannot load keys.\n" >&2
+            fi
+            wait_for_key
+            ;;
+        4) # Delete Single Key
+            log_debug "Main loop - Case 4: Ensuring agent (mode: check) before calling delete_single_key..."
+            if ensure_ssh_agent "check"; then
+                delete_single_key || true
+            else
+                log_info "Menu: No valid agent found for deleting single key."
+                printf "No running SSH agent found to delete keys from.\n" >&2
+            fi
+            wait_for_key
+            ;;
+        5) # Delete All Keys
+            log_debug "Main loop - Case 5: Ensuring agent (mode: check) before calling delete_all_keys..."
+            if ensure_ssh_agent "check"; then
+                # delete_all_keys handles confirmation internally.
+                delete_all_keys || true
+            else
+                log_info "Menu: No valid agent found for deleting all keys."
+                printf "No running SSH agent found to delete keys from.\n" >&2
+            fi
+            wait_for_key
+            ;;
+        6) # Reload All Keys (from selected dir)
+            printf "\n--- Reload All Keys (from selected dir) ---\n"
+            log_info "Menu: Reloading all keys selected (uses find -> delete -> add)."
+
+            # Ensure agent is running first using "load" mode.
+            if ! ensure_ssh_agent "load"; then
+                log_error "Cannot reload keys: Failed to ensure SSH agent is running."
+                printf "Error: Failed to connect to or start SSH agent. Cannot reload keys.\n" >&2
                 wait_for_key
-                ;;
-            3)  # Load Specific Key(s)
-                log_debug "Main loop - Case 3: Ensuring agent (mode: load) before calling load_specific_keys..."
-                if ensure_ssh_agent "load"; then
-                    load_specific_keys || true
+                continue # Go back to menu start.
+            fi
+
+            # Temporarily disable exit on error to handle update_keys_list_file status.
+            set +e
+            log_debug "Menu Reload Keys: Agent confirmed. Updating key list using update_keys_list_file..."
+            local update_status=0
+            # Run update_keys_list_file to find keys in SSH_DIR and write to temp file.
+            update_keys_list_file
+            update_status=$? # Capture status.
+
+            # Check the result of finding keys.
+            if [ "$update_status" -ne 0 ]; then
+                log_error "Menu Reload Keys: update_keys_list_file failed (status: $update_status)."
+                # Status 1 means no keys found, which is okay for reload (just means we clear agent).
+                if [ "$update_status" -eq 1 ]; then
+                    log_info "Menu Reload Keys: No keys found by update_keys_list_file. Will proceed to clear agent keys."
+                    # update_keys_list_file already printed "No keys found".
+                    # Ensure the persistent list file is empty.
+                    >"$VALID_KEY_LIST_FILE" || log_warn "Could not clear persistent key list file $VALID_KEY_LIST_FILE"
                 else
-                    log_error "Menu: Failed to ensure agent is ready for loading specific keys."
-                    printf "Error: Agent could not be started or connected. Cannot load keys.\n" >&2
+                    # Other error during update_keys_list_file (e.g., temp file not writable).
+                    printf "Error finding keys in directory. Reload aborted.\n" >&2
+                    set -e # Re-enable exit on error.
+                    wait_for_key
+                    continue # Back to menu.
                 fi
-                wait_for_key
-                ;;
-            4)  # Delete Single Key
-                log_debug "Main loop - Case 4: Ensuring agent (mode: check) before calling delete_single_key..."
-                if ensure_ssh_agent "check"; then
-                    delete_single_key || true
-                else
-                    log_info "Menu: No valid agent found for deleting single key."
-                    printf "No running SSH agent found to delete keys from.\n" >&2
+            else
+                # Keys were found (status 0). Copy the list from temp to persistent file.
+                log_debug "Copying found keys from temp file '$KEYS_LIST_TMP' to '$VALID_KEY_LIST_FILE'"
+                if ! cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE"; then
+                    log_error "Failed to copy temp key list '$KEYS_LIST_TMP' to '$VALID_KEY_LIST_FILE'. Reload aborted."
+                    printf "Error copying key list. Reload aborted.\n" >&2
+                    set -e # Re-enable exit on error.
+                    wait_for_key
+                    continue # Back to menu.
                 fi
-                wait_for_key
-                ;;
-            5)  # Delete All Keys
-                log_debug "Main loop - Case 5: Ensuring agent (mode: check) before calling delete_all_keys..."
-                if ensure_ssh_agent "check"; then
-                     # delete_all_keys handles confirmation internally.
-                     delete_all_keys || true
-                else
-                     log_info "Menu: No valid agent found for deleting all keys."
-                     printf "No running SSH agent found to delete keys from.\n" >&2
-                fi
-                wait_for_key
-                ;;
-            6)  # Reload All Keys (from selected dir)
-                printf "\n--- Reload All Keys (from selected dir) ---\n"
-                log_info "Menu: Reloading all keys selected (uses find -> delete -> add)."
+                # Secure the persistent key list file.
+                chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "Could not set permissions on $VALID_KEY_LIST_FILE"
+            fi
 
-                # Ensure agent is running first using "load" mode.
-                if ! ensure_ssh_agent "load"; then
-                    log_error "Cannot reload keys: Failed to ensure SSH agent is running."
-                    printf "Error: Failed to connect to or start SSH agent. Cannot reload keys.\n" >&2
-                    wait_for_key; continue # Go back to menu start.
-                fi
+            # Delete existing keys from the agent *before* adding the new list.
+            log_info "Deleting existing keys from agent before adding..."
+            delete_keys_from_agent || true # Ignore failure here, proceed to add anyway.
 
-                # Temporarily disable exit on error to handle update_keys_list_file status.
-                set +e
-                log_debug "Menu Reload Keys: Agent confirmed. Updating key list using update_keys_list_file..."
-                local update_status=0
-                # Run update_keys_list_file to find keys in SSH_DIR and write to temp file.
-                update_keys_list_file
-                update_status=$? # Capture status.
+            # Add keys based on the (potentially updated or cleared) persistent list file.
+            log_info "Adding keys found in directory (from list $VALID_KEY_LIST_FILE)..."
+            if [ -s "$VALID_KEY_LIST_FILE" ]; then
+                # If the list file exists and is not empty, add keys.
+                add_keys_to_agent
+                local add_status=$? # Capture status.
+                log_debug "add_keys_to_agent finished with status: $add_status"
+                # add_keys_to_agent prints its own summary.
+            else
+                # If the list file is empty (either no keys found or cp failed earlier).
+                log_info "No keys found in the persistent list to add."
+                printf "No keys were found in the directory to add (or list was empty).\n"
+            fi
 
-                # Check the result of finding keys.
-                if [ "$update_status" -ne 0 ]; then
-                    log_error "Menu Reload Keys: update_keys_list_file failed (status: $update_status)."
-                    # Status 1 means no keys found, which is okay for reload (just means we clear agent).
-                    if [ "$update_status" -eq 1 ]; then
-                        log_info "Menu Reload Keys: No keys found by update_keys_list_file. Will proceed to clear agent keys."
-                        # update_keys_list_file already printed "No keys found".
-                        # Ensure the persistent list file is empty.
-                        > "$VALID_KEY_LIST_FILE" || log_warn "Could not clear persistent key list file $VALID_KEY_LIST_FILE"
-                    else
-                        # Other error during update_keys_list_file (e.g., temp file not writable).
-                        printf "Error finding keys in directory. Reload aborted.\n" >&2
-                        set -e # Re-enable exit on error.
-                        wait_for_key; continue # Back to menu.
-                    fi
-                else
-                    # Keys were found (status 0). Copy the list from temp to persistent file.
-                    log_debug "Copying found keys from temp file '$KEYS_LIST_TMP' to '$VALID_KEY_LIST_FILE'"
-                    if ! cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE"; then
-                        log_error "Failed to copy temp key list '$KEYS_LIST_TMP' to '$VALID_KEY_LIST_FILE'. Reload aborted."
-                        printf "Error copying key list. Reload aborted.\n" >&2
-                        set -e # Re-enable exit on error.
-                        wait_for_key; continue # Back to menu.
-                    fi
-                    # Secure the persistent key list file.
-                    chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "Could not set permissions on $VALID_KEY_LIST_FILE"
-                fi
-
-                # Delete existing keys from the agent *before* adding the new list.
-                log_info "Deleting existing keys from agent before adding..."
-                delete_keys_from_agent || true # Ignore failure here, proceed to add anyway.
-
-                # Add keys based on the (potentially updated or cleared) persistent list file.
-                log_info "Adding keys found in directory (from list $VALID_KEY_LIST_FILE)..."
-                if [ -s "$VALID_KEY_LIST_FILE" ]; then
-                    # If the list file exists and is not empty, add keys.
-                    add_keys_to_agent
-                    local add_status=$? # Capture status.
-                    log_debug "add_keys_to_agent finished with status: $add_status"
-                    # add_keys_to_agent prints its own summary.
-                else
-                    # If the list file is empty (either no keys found or cp failed earlier).
-                    log_info "No keys found in the persistent list to add."
-                    printf "No keys were found in the directory to add (or list was empty).\n"
-                fi
-
-                set -e # Re-enable exit on error.
-                wait_for_key
-                ;;
-            7)  # Display Log Location
-                log_debug "Main loop - Case 7: Calling display_log_location..."
-                display_log_location
-                wait_for_key
-                ;;
-            q|Q) # Quit
-                log_info "User selected Quit from menu."
-                printf "\nThank you for using SSH Key Manager. Goodbye!\n"
-                exit 0 # Exit the script cleanly.
-                ;;
-            *) # Should not be reachable due to get_menu_choice validation.
-                log_error "Main loop - Reached unexpected default case for choice: $choice"
-                printf "Error: Unexpected menu choice processed!\n" >&2
-                sleep 2 # Pause briefly in case of error loop.
-                ;;
+            set -e # Re-enable exit on error.
+            wait_for_key
+            ;;
+        7) # Display Log Location
+            log_debug "Main loop - Case 7: Calling display_log_location..."
+            display_log_location
+            wait_for_key
+            ;;
+        q | Q) # Quit
+            log_info "User selected Quit from menu."
+            printf "\nThank you for using SSH Key Manager. Goodbye!\n"
+            exit 0 # Exit the script cleanly.
+            ;;
+        *) # Should not be reachable due to get_menu_choice validation.
+            log_error "Main loop - Reached unexpected default case for choice: $choice"
+            printf "Error: Unexpected menu choice processed!\n" >&2
+            sleep 2 # Pause briefly in case of error loop.
+            ;;
         esac
         log_debug "Main loop - End of iteration for choice: $choice"
     done
 } # END run_interactive_menu
 # ==============================================================================
 # --- End of Library ---
-# ============================================================================== 
+# ==============================================================================
