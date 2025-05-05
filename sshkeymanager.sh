@@ -97,7 +97,7 @@ declare SSH_DIR="${SKM_SSH_DIR:-$HOME/.ssh}" # SSH directory path. Env override:
 # File storing the list of key basenames to be loaded by add_keys_to_agent.
 declare VALID_KEY_LIST_FILE="${SKM_VALID_KEYS_FILE:-$HOME/.config/sshkeymanager/ssh_keys_list}" # Env override: SKM_VALID_KEYS_FILE.
 # File storing the running ssh-agent environment variables for persistence.
-declare AGENT_ENV_FILE="${SKM_AGENT_ENV_FILE:-$HOME/.config/agent.env}" # Env override: SKM_AGENT_ENV_FILE.
+declare AGENT_ENV_FILE="${SKM_AGENT_ENV_FILE:-$HOME/.config/sshkeymanager/agent.env}" # Env override: SKM_AGENT_ENV_FILE.
 
 # Temporary File (Declared globally, created in main())
 declare KEYS_LIST_TMP="" # Path to the temporary file used for listing keys found by `find`.
