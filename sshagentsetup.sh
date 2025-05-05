@@ -211,14 +211,10 @@ _log_base() {
 # Outputs: (Via _log_base)
 #   - Files Modified: Appends the formatted log message to $LOG_FILE.
 
-log_info() { _log_base "INFO" "$1"; }
-log_error() { _log_base "ERROR" "$1"; }
-log_warn() { _log_base "WARN" "$1"; }
-log_debug() {
-    # Only log if verbose mode is enabled
-    [ "$_sa_IS_VERBOSE" = "true" ] || return 0
-    _log_base "DEBUG" "$1";
-} # END log_debug
+_log_info() { _log_base "INFO" "$1"; }
+_log_error() { _log_base "ERROR" "$1"; }
+_log_warn() { _log_base "WARN" "$1"; }
+_log_debug() { _log_base "DEBUG" "$1"; }
 
 # --- _log_marker ---
 # Internal helper to write markers, ensuring they are written even if logging is disabled initially
@@ -236,9 +232,79 @@ _log_marker() {
 }
 
 # --- Library Sourcing ---
-# Define the script's directory using its known absolute path for reliable sourcing
+# Define the script's directory using a robust, portable symlink resolution method.
+
 declare SCRIPT_DIR
-SCRIPT_DIR="/Users/experimentalist/TRAINING/MYZEN/LANGUAGES/BASH/SSHKEYGEN/AutoLoadSSHKEYS"
+declare LIB_DIR
+
+# --- Function to determine the script directory ---
+# This encapsulates the logic and uses local variables.
+# It echoes the directory path on success and returns 0.
+# It prints an error and returns 1 on failure.
+_determine_script_dir() {
+    local source_path=""
+    local script_dir=""
+
+    if [ -n "$ZSH_VERSION" ]; then
+        # Zsh: Use :A modifier for realpath, :h for dirname
+        # %x is preferred over %N as a BASH_SOURCE equivalent
+        source_path="${(%):-%x}"
+        # Check if we got a path before applying modifiers
+        _log_info "source_path: $source_path"
+        if [[ -n "$source_path" ]]; then
+            # :A resolves symlinks and makes absolute, :h gets the directory
+            script_dir="${source_path:A:h}"
+        fi
+    elif [ -n "$BASH_VERSION" ]; then
+        # Bash: Use BASH_SOURCE and readlink -f (GNU extension) + dirname
+        if [[ -n "${BASH_SOURCE[0]}" ]]; then
+            source_path="${BASH_SOURCE[0]}"
+            local real_path
+            # Use readlink -f for robustness (requires GNU coreutils or compatible)
+            # Capture stdout and check exit status
+            if real_path=$(readlink -f -- "$source_path" 2>/dev/null); then
+                 script_dir=$(dirname -- "$real_path")
+            fi
+            # Fallback if readlink -f fails but path exists (e.g., non-GNU readlink)
+             if [[ -z "$script_dir" && -e "$source_path" ]]; then
+                 # Basic dirname might work if not a symlink needing resolution
+                 script_dir=$(cd -P "$(dirname -- "$source_path")" &>/dev/null && pwd)
+             fi
+        fi
+    else
+        # Fallback for other shells (less reliable, especially when sourced)
+        # Try resolving $0 using readlink -f if possible
+        if [[ -n "$0" ]]; then
+             source_path="$0"
+             local real_path
+             if real_path=$(readlink -f -- "$source_path" 2>/dev/null); then
+                 script_dir=$(dirname -- "$real_path")
+             # Basic fallback if $0 has a slash (might be relative/absolute path)
+             elif [[ "$source_path" == */* ]]; then
+                 script_dir=$(cd -P "$(dirname -- "$source_path")" &>/dev/null && pwd)
+             fi
+        fi
+    fi
+
+    # Check if SCRIPT_DIR was successfully determined
+    if [[ -z "$script_dir" || ! -d "$script_dir" ]]; then
+        echo "Error: Could not determine the script's real directory." >&2
+        return 1
+    fi
+
+    # Echo the result for assignment
+    echo "$script_dir"
+    return 0
+}
+
+# --- Call the function and assign the result ---
+# Use command substitution to capture the echoed path
+# Check the return status ($?) for success
+if ! SCRIPT_DIR=$(_determine_script_dir); then
+    # Error message already printed by the function
+    # Exit/return based on execution context (sourcing vs direct execution)
+    (return 0 2>/dev/null) && return 1 || exit 1
+fi
 
 # Define the library directory relative to the script directory
 LIB_DIR="$SCRIPT_DIR/lib"
@@ -251,13 +317,6 @@ else
     echo "Error: Library file not found: $LIB_DIR/logging.sh" >&2
     return 1 # Use return as this script is sourced
 fi
-
-# if [ -f "$LIB_DIR/utils.sh" ]; then
-#     . "$LIB_DIR/utils.sh"
-# else
-#     echo "Error: Library file not found: $LIB_DIR/utils.sh" >&2
-#     return 1
-# fi
 
 if [ -f "$LIB_DIR/agent.sh" ]; then
     . "$LIB_DIR/agent.sh"
@@ -552,8 +611,7 @@ sa_setup() {
     log_debug "sa_setup: Main setup function invoked."
 
     # --- Log Script Start --- 
-    # Must be called *after* logging functions are defined and LOG_FILE is potentially set.
-    _log_marker "_______<=:START:=> SSH Agent Setup Script______"
+    # Must be called *after* logging functions are defined and LOG_FILE is potentially set.    
 
     # --- Argument Parsing ---
     local key_list_source_file=""
