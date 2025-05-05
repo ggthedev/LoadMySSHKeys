@@ -49,8 +49,8 @@ fi
 # ---
 setup_logging() {
     # --- Configuration Variables ---
-    local max_log_size=1048576  # Max log size in bytes (1 MiB). Rotation triggered above this.
-    local max_log_files=5       # Number of rotated log files to keep (e.g., log.1, log.2, ..., log.5).
+    local max_log_size=1048576 # Max log size in bytes (1 MiB). Rotation triggered above this.
+    local max_log_files=5      # Number of rotated log files to keep (e.g., log.1, log.2, ..., log.5).
 
     # --- Determine Log Directory ---
     # Priority:
@@ -58,93 +58,105 @@ setup_logging() {
     # 2. Platform-specific defaults.
     # 3. Fallback directory ($HOME/.ssh/logs).
     if [ -n "${SKM_LOG_DIR:-}" ]; then
-         # Use environment variable if set and non-empty.
-         LOG_DIR="$SKM_LOG_DIR"
-         # log_debug cannot be called reliably yet, as LOG_FILE is not set.
-         # Consider printing to stderr if verbose needed here.
-         # printf "Debug: Using log directory from SKM_LOG_DIR: %s\n" "$LOG_DIR" >&2
+        # Use environment variable if set and non-empty.
+        LOG_DIR="$SKM_LOG_DIR"
+        # log_debug cannot be called reliably yet, as LOG_FILE is not set.
+        # Consider printing to stderr if verbose needed here.
+        # printf "Debug: Using log directory from SKM_LOG_DIR: %s\n" "$LOG_DIR" >&2
     else
         # Determine directory based on OS platform.
         case "$PLATFORM" in
-            "Darwin")
-                LOG_DIR="$LOG_DIR_MACOS" # ~/Library/Logs/sshkeymanager
-                ;;
-            "Linux")
-                # Prefer system-wide log if writable, otherwise user-local.
-                if [ -w "$LOG_DIR_LINUX_VAR" ] 2>/dev/null; then
-                     LOG_DIR="$LOG_DIR_LINUX_VAR" # /var/log/sshkeymanager
-                else
-                     LOG_DIR="$LOG_DIR_LINUX_LOCAL" # ~/.local/log/sshkeymanager
-                fi
-                ;;
-            *)
-                # Default for unknown platforms.
-                LOG_DIR="$LOG_DIR_FALLBACK" # ~/.ssh/logs
-                ;;
+        "Darwin")
+            LOG_DIR="$LOG_DIR_MACOS" # ~/Library/Logs/sshkeymanager
+            ;;
+        "Linux")
+            # Prefer system-wide log if writable, otherwise user-local.
+            if [ -w "$LOG_DIR_LINUX_VAR" ] 2>/dev/null; then
+                LOG_DIR="$LOG_DIR_LINUX_VAR" # /var/log/sshkeymanager
+            else
+                LOG_DIR="$LOG_DIR_LINUX_LOCAL" # ~/.local/log/sshkeymanager
+            fi
+            ;;
+        *)
+            # Default for unknown platforms.
+            LOG_DIR="$LOG_DIR_FALLBACK" # ~/.ssh/logs
+            ;;
         esac
         # printf "Debug: Using platform default log directory: %s\n" "$LOG_DIR" >&2
     fi
 
     # --- Create Log Directory (with Fallback) ---
-    local initial_log_dir="$LOG_DIR" # Store the initially determined directory for messages.
-    # Attempt to create the chosen log directory (including parent directories).
-    # Redirect stderr to suppress "File exists" messages.
-    if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-        # If creation failed, print warning and try the fallback directory.
-        printf "Warning: Could not create log directory '%s'. Trying fallback '%s'.\n" "$initial_log_dir" "$LOG_DIR_FALLBACK" >&2
+    local initial_log_dir="$LOG_DIR"
+    local mkdir_status
+
+    # Attempt to create the chosen log directory, capture status
+    mkdir -p "$LOG_DIR"
+    mkdir_status=$?
+    # printf "DEBUG_TERM: mkdir status for initial LOG_DIR (%s): %s\n" "$LOG_DIR" "$mkdir_status" >&2 # DEBUG Removed
+
+    # Check the captured status explicitly
+    if [ "$mkdir_status" -ne 0 ]; then
+        local msg="Warning: Could not create log directory '$initial_log_dir' (Status: $mkdir_status). Trying fallback '$LOG_DIR_FALLBACK'."
+        # Append warning to log file if possible, else print to stderr
+        if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg" >>"$LOG_FILE"; else printf "%s\n" "$msg" >&2; fi
         LOG_DIR="$LOG_DIR_FALLBACK"
-        # Attempt to create the fallback directory.
-        if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-            # If even the fallback fails, disable logging.
-            printf "Warning: Could not create fallback log directory '%s'. Logging disabled.\n" "$LOG_DIR" >&2
-            LOG_FILE="/dev/null" # Set log file to /dev/null to effectively disable logging.
-            return 1 # Indicate logging setup failure.
+
+        # Attempt to create the fallback directory, capture status
+        local mkdir_fallback_status
+        mkdir -p "$LOG_DIR"
+        mkdir_fallback_status=$?
+        # printf "DEBUG_TERM: mkdir status for fallback LOG_DIR (%s): %s\n" "$LOG_DIR" "$mkdir_fallback_status" >&2 # DEBUG Removed
+
+        if [ "$mkdir_fallback_status" -ne 0 ]; then
+            local msg2="Warning: Could not create fallback log directory '$LOG_DIR' (Status: $mkdir_fallback_status). Logging disabled."
+            # Append warning to log file if possible, else print to stderr
+            if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg2" >>"$LOG_FILE"; else printf "%s\n" "$msg2" >&2; fi
+            LOG_FILE="/dev/null"
+            return 1
         fi
-         # If fallback creation succeeded, inform the user.
-         printf "Warning: Using fallback log directory '%s'.\n" "$LOG_DIR" >&2
+        local msg3="Warning: Using fallback log directory '$LOG_DIR'."
+        # Append warning to log file if possible, else print to stderr
+        if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg3" >>"$LOG_FILE"; else printf "%s\n" "$msg3" >&2; fi
     fi
 
     # --- Set Log File Path ---
-    # Construct the full path to the log file.
     LOG_FILE="${LOG_DIR}/${LOG_FILENAME}"
 
     # --- Create Log File (if needed) ---
-    # Ensure the log file exists. If it doesn't, create it.
-    # Redirect stderr to suppress errors if the file exists but isn't writable temporarily (permissions fixed later).
     if ! touch "$LOG_FILE" 2>/dev/null; then
-        # If the file cannot be created (e.g., directory not writable), disable logging.
-        printf "Warning: Could not create log file '%s'. Logging disabled.\n" "$LOG_FILE" >&2
+        local msg="Warning: Could not create log file '$LOG_FILE'. Logging disabled."
+        # Print to stderr as LOG_FILE setup failed
+        printf "%s\n" "$msg" >&2
         LOG_FILE="/dev/null"
-        return 1 # Indicate logging setup failure.
+        return 1
     fi
 
     # --- Log Rotation ---
-    # Check if the log file exists and needs rotation (based on size).
     if [ -f "$LOG_FILE" ]; then
         local log_size
-        # Get the current log file size using the platform-specific command.
-        # Redirect stderr in case of issues reading file size (e.g., permissions).
         if ! log_size=$($STAT_CMD "$LOG_FILE" 2>/dev/null); then
-            # If size cannot be determined, skip rotation and warn user.
-            printf "Warning: Could not determine size of log file '%s'. Log rotation skipped.\n" "$LOG_FILE" >&2
+            local msg="Warning: Could not determine size of log file '$LOG_FILE'. Log rotation skipped."
+            # Append warning to log file if possible
+            if [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$msg" >>"$LOG_FILE"; else printf "%s\n" "$msg" >&2; fi
         elif [ "$log_size" -gt "$max_log_size" ]; then
             # If log size exceeds the maximum, perform rotation.
             # Log rotation start only if verbose mode is enabled.
             # Note: log_debug might not work perfectly here if called *during* setup,
             # but we attempt it. A printf might be more reliable if issues arise.
             if [ "${IS_VERBOSE:-false}" = "true" ]; then
-                 # Use printf as log_debug itself relies on LOG_FILE being fully set.
-                 # If log_debug was defined *before* setup_logging, this would be okay.
-                 local ts_rot; ts_rot=$(date '+%Y-%m-%d %H:%M:%S')
-                 echo "$ts_rot - $$ - DEBUG: Rotating logs (size $log_size > $max_log_size)..." >> "$LOG_FILE.prerotate_debug" # Log to temp file during rotation
+                # Use printf as log_debug itself relies on LOG_FILE being fully set.
+                # If log_debug was defined *before* setup_logging, this would be okay.
+                local ts_rot
+                ts_rot=$(date '+%Y-%m-%d %H:%M:%S')
+                echo "$ts_rot - $$ - DEBUG: Rotating logs (size $log_size > $max_log_size)..." >>"$LOG_FILE.prerotate_debug" # Log to temp file during rotation
             fi
             # Rotate existing log files: log.4 -> log.5, log.3 -> log.4, ..., log.1 -> log.2
             # Loop from max_log_files-1 down to 1.
             local i
-            for i in $(seq $((max_log_files-1)) -1 1); do
+            for i in $(seq $((max_log_files - 1)) -1 1); do
                 # If the source rotated file exists, move it to the next number.
                 # -f forces overwrite. Redirect stderr to ignore errors (e.g., file not found).
-                [ -f "${LOG_FILE}.${i}" ] && mv -f "${LOG_FILE}.${i}" "${LOG_FILE}.$((i+1))" 2>/dev/null || true
+                [ -f "${LOG_FILE}.${i}" ] && mv -f "${LOG_FILE}.${i}" "${LOG_FILE}.$((i + 1))" 2>/dev/null || true
             done
             # Move the current log file to log.1.
             mv -f "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
@@ -152,13 +164,17 @@ setup_logging() {
             touch "$LOG_FILE" 2>/dev/null || printf "Warning: Failed to create new log file after rotation: %s\n" "$LOG_FILE" >&2
             # Clean up temporary debug log if created
             rm -f "$LOG_FILE.prerotate_debug" 2>/dev/null
+            local rot_warn_msg=""
+            # Append rotation warning to log file if it occurred
+            if [ -n "$rot_warn_msg" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$rot_warn_msg" >>"$LOG_FILE"; fi
         fi
     fi
 
     # --- Set Permissions ---
-    # Set log file permissions to read/write for owner only (600).
-    # Redirect stderr to suppress errors if permissions cannot be set (e.g., file system issues).
-    chmod 600 "$LOG_FILE" 2>/dev/null || printf "Warning: Could not set permissions (600) on log file: %s\n" "$LOG_FILE" >&2
+    local perm_warn_msg=""
+    chmod 600 "$LOG_FILE" 2>/dev/null || perm_warn_msg="Warning: Could not set permissions (600) on log file: $LOG_FILE"
+    # Append permission warning to log file if it occurred
+    if [ -n "$perm_warn_msg" ] && [ "$LOG_FILE" != "/dev/null" ]; then printf "%s\n" "$perm_warn_msg" >>"$LOG_FILE"; fi
 
     # --- Final Log Message (Requires working logging) ---
     # Log the successful setup and the final log file path.
@@ -168,7 +184,6 @@ setup_logging() {
     return 0 # Indicate successful setup.
 
 } # END setup_logging
-
 
 # ==============================================================================
 # --- Core Logging Functions ---
@@ -196,10 +211,9 @@ _log_marker() {
     else
         # If enabled, append the marker to the log file.
         # Format: Timestamp - PID - MARKER: Message
-        echo "$timestamp - $$ - MARKER: $marker_text" >> "$LOG_FILE"
+        echo "$timestamp - $$ - MARKER: $marker_text" >>"$LOG_FILE"
     fi
 }
-
 
 # --- log ---
 #
@@ -218,10 +232,9 @@ log() {
     # Only log if LOG_FILE is not /dev/null.
     if [ "$LOG_FILE" != "/dev/null" ]; then
         # Format: Timestamp - PID - INFO: Message
-        echo "$timestamp - $$ - INFO: $1" >> "$LOG_FILE"
+        echo "$timestamp - $$ - INFO: $1" >>"$LOG_FILE"
     fi
 }
-
 
 # --- log_error ---
 #
@@ -242,13 +255,12 @@ log_error() {
     if [ "$LOG_FILE" != "/dev/null" ]; then
         # Append formatted error message to the log file.
         # Format: Timestamp - PID - ERROR: Message
-        echo "$timestamp - $$ - ERROR: $1" >> "$LOG_FILE"
+        echo "$timestamp - $$ - ERROR: $1" >>"$LOG_FILE"
     else
         # If logging is disabled, print a simple error message to stderr.
         printf "An error occurred. (Logging disabled)\n" >&2
     fi
 }
-
 
 # --- log_warn ---
 #
@@ -268,14 +280,13 @@ log_warn() {
     if [ "$LOG_FILE" != "/dev/null" ]; then
         # Append formatted warning message to the log file.
         # Format: Timestamp - PID - WARN: Message
-        echo "$timestamp - $$ - WARN: $1" >> "$LOG_FILE"
+        echo "$timestamp - $$ - WARN: $1" >>"$LOG_FILE"
     else
         # If logging is disabled, perhaps print warning directly?
         # For now, we do nothing on stderr if logging is off for warnings.
         : # No-op
     fi
 }
-
 
 # --- log_debug ---
 #
@@ -298,10 +309,9 @@ log_debug() {
     if [ "$LOG_FILE" != "/dev/null" ]; then
         # Append formatted debug message to the log file.
         # Format: Timestamp - PID - DEBUG: Message
-        echo "$timestamp - $$ - DEBUG: $1" >> "$LOG_FILE"
+        echo "$timestamp - $$ - DEBUG: $1" >>"$LOG_FILE"
     fi
 }
-
 
 # --- log_info ---
 #
@@ -319,9 +329,9 @@ log_info() {
     if [ "$LOG_FILE" != "/dev/null" ]; then
         # Append formatted info message to the log file.
         # Format: Timestamp - PID - INFO: Message
-        echo "$timestamp - $$ - INFO: $1" >> "$LOG_FILE"
+        echo "$timestamp - $$ - INFO: $1" >>"$LOG_FILE"
     fi
 }
 # ==============================================================================
 # --- End of Library ---
-# ============================================================================== 
+# ==============================================================================

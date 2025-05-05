@@ -1,0 +1,15 @@
+# Ignore the Formula directory (Homebrew formula files)
+Formula/
+
+# Common files to ignore
+.DS_Store
+*.log
+*.tmp
+.vscode/
+.idea/
+
+# Backup files
+*~
+*.bak
+*.swp
+/Formula

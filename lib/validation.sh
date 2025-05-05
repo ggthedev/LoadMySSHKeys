@@ -76,7 +76,6 @@ validate_directory() {
     return $return_status # Return the final status code.
 }
 
-
 # --- validate_ssh_dir ---
 #
 # @description Validates the primary SSH directory specified by the global $SSH_DIR.
@@ -126,4 +125,4 @@ validate_ssh_dir() {
 }
 # ==============================================================================
 # --- End of Library ---
-# ============================================================================== 
+# ==============================================================================

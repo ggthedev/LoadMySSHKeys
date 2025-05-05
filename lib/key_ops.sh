@@ -26,133 +26,187 @@ fi
 
 # --- add_keys_to_agent ---
 #
-# @description Reads a list of key file basenames from the persistent key list
-#              file ($VALID_KEY_LIST_FILE) and attempts to add each corresponding
-#              key file (located in $SSH_DIR) to the ssh-agent using `ssh-add`.
-#              Handles platform differences (macOS Keychain integration).
-# @arg        None
-# @requires   Global variable $VALID_KEY_LIST_FILE must point to a readable file
-#             containing one key basename per line.
-# @requires   Global variable $SSH_DIR must point to the directory containing the keys.
-# @requires   An accessible ssh-agent must be running (implicitly required by ssh-add).
-# @return     0 If at least one key was successfully added to the agent.
-# @return     1 If the key list file is missing/empty, if reading the file fails,
-#               OR if all attempts to add keys failed (keys not found, passphrase issues,
-#               agent connection errors).
-# @prints     Status messages to stdout indicating success/failure for each key attempt
-#             and a final summary.
-# @stdout     Progress messages (key adding attempts) and summary message.
-# @stderr     None (Errors are logged using logging functions).
+# @description Reads a list of key file basenames from $VALID_KEY_LIST_FILE,
+#              constructs full paths, and adds them to the ssh-agent.
+#              Supports both bulk addition (single ssh-add call) and per-key addition.
+# @arg        [--bulk] Optional flag to use a single ssh-add command for all keys.
+# @arg        [--quiet] Optional flag to suppress user-facing printf messages (log only).
+# @requires   Global variables $VALID_KEY_LIST_FILE, $SSH_DIR.
+# @modifies   Adds keys to the running ssh-agent.
+# @return     0 If at least one key was successfully added (or ssh-add bulk reports status 0 or 1).
+# @return     1 If no keys were found to add, no keys were successfully added,
+#               or a critical ssh-add error occurred (e.g., status 2+).
+# @prints     Status messages to stdout unless --quiet is used.
+# @stderr     None directly (errors logged).
 # @depends    Global variables: VALID_KEY_LIST_FILE, SSH_DIR.
 #             Functions: log_debug, log_info, log_error, log_warn.
-#             External command: ssh-add, printf, read, uname.
+#             External command: ssh-add, printf, read, uname, basename.
 # ---
 add_keys_to_agent() {
-    log_debug "Entering function: ${FUNCNAME[0]} (Version using list file: $VALID_KEY_LIST_FILE)"
-    log_info "Attempting to add keys to agent based on list file: $VALID_KEY_LIST_FILE..."
+    local bulk_mode=false
+    local quiet_mode=false
+    local keyfile key_path platform
+    local -a key_paths_to_add=() # Array for full paths
+    local -i success_count=0 invalid_path_count=0 failed_add_count=0 line_count=0
+    local return_status=1 # Default to failure
 
-    # --- Validate Input File ---
-    # Check if the specified key list file exists and is not empty (-s).
+    # --- Argument Parsing ---
+    # Simple loop to handle flags before processing the list file
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --bulk) bulk_mode=true; log_debug "add_keys_to_agent: Bulk mode enabled." ;; # TODO: Fix this, non-positional flag parsing like this is bad
+            --quiet) quiet_mode=true; log_debug "add_keys_to_agent: Quiet mode enabled." ;; # TODO: Fix this, non-positional flag parsing like this is bad
+            *) log_warn "add_keys_to_agent: Ignoring unrecognized argument: $arg" ;;
+        esac
+        # Note: We don't 'shift' as we aren't expecting positional args after flags
+    done
+
+    log_debug "Entering function: ${FUNCNAME[0]} (Bulk: $bulk_mode, Quiet: $quiet_mode, List: $VALID_KEY_LIST_FILE)"
+    if [[ "$quiet_mode" == false ]]; then
+        printf "Attempting to add keys to agent from list: %s\n" "$VALID_KEY_LIST_FILE"
+    else
+        log_info "Attempting to add keys to agent based on list file: $VALID_KEY_LIST_FILE..."
+    fi
+
+    # --- Validate Input File & Read Keys ---
     if [ ! -s "$VALID_KEY_LIST_FILE" ]; then
-        log_error "Key list file '$VALID_KEY_LIST_FILE' is empty or does not exist."
-        printf "Error: Key list file '%s' is empty or does not exist. Cannot add keys.\\n" "$VALID_KEY_LIST_FILE" >&2
-        return 1 # Failure: Cannot proceed without the key list.
-    fi
-
-    printf "Adding SSH keys to agent (using list: %s)...\\n" "$VALID_KEY_LIST_FILE"
-
-    # --- Initialization ---
-    local platform_local
-    platform_local=$(uname -s) # Detect OS for platform-specific commands.
-    local keyfile key_path added_count=0 failed_count=0 ssh_add_output ssh_add_status
-
-    # --- Process Keys from List ---
-    # Use `set +e` to prevent the script from exiting if `ssh-add` fails within the loop.
-    # We need to manually check the exit status of `ssh-add` for each key.
-    set +e
-    # Read the key list file line by line.
-    while IFS= read -r keyfile; do
-        # Skip empty lines in the key list file.
-        [ -z "$keyfile" ] && continue
-
-        # Construct the full path to the private key file.
-        key_path="$SSH_DIR/$keyfile"
-        log_debug "Processing key entry from list: '$keyfile' (Full path: '$key_path')"
-
-        # Check if the corresponding private key file actually exists.
-        if [ -f "$key_path" ]; then
-            log_info "Attempting to add key file: $key_path"
-            # --- Platform-Specific ssh-add Command ---
-            if [[ "$platform_local" == "Darwin" ]]; then
-                # On macOS, use --apple-use-keychain to integrate with macOS Keychain for passphrase management.
-                # Capture both stdout and stderr (2>&1) and allow failure (|| true).
-                ssh_add_output=$(ssh-add --apple-use-keychain "$key_path" 2>&1 || true)
-                # Get the exit status of the ssh-add command (robustly handling pipes if they were used).
-                ssh_add_status=${PIPESTATUS[0]:-$?}
-            else
-                # On Linux and other systems, use standard ssh-add.
-                ssh_add_output=$(ssh-add "$key_path" 2>&1 || true)
-                ssh_add_status=${PIPESTATUS[0]:-$?}
-            fi
-
-            log_debug "ssh-add command status for '$keyfile': $ssh_add_status"
-            # Log the output/error from ssh-add only if the command failed, to avoid clutter.
-            if [ "$ssh_add_status" -ne 0 ]; then
-                log_debug "ssh-add output/error was: $ssh_add_output"
-            fi
-
-            # --- Handle ssh-add Exit Status ---
-            if [ "$ssh_add_status" -eq 0 ]; then
-                # Status 0: Success.
-                log_info "Successfully added key '$keyfile' to agent."
-                printf "  ✓ Added key '%s'\\n" "$keyfile"
-                ((added_count++)) # Increment success counter.
-            elif [ "$ssh_add_status" -eq 1 ]; then
-                 # Status 1: Failure, often requires passphrase or permission issue.
-                 printf "  ✗ Failed to add key '%s' (status: %d - passphrase needed or other issue?)\\n" "$keyfile" "$ssh_add_status"
-                 log_warn "Failed to add key '$keyfile' (Path: $key_path, Status: $ssh_add_status). Check passphrase or permissions."
-                 ((failed_count++)) # Increment failure counter.
-            elif [ "$ssh_add_status" -eq 2 ]; then
-                 # Status 2: Cannot connect to the agent.
-                 printf "  ✗ Failed to add key '%s' (status: %d - cannot connect to agent)\\n" "$keyfile" "$ssh_add_status"
-                 log_error "Failed to add key '$keyfile' (Path: $key_path, Status: $ssh_add_status - Cannot connect to agent)."
-                 ((failed_count++))
-                 # Consider adding a 'break' here if agent connection fails repeatedly?
-            else
-                 # Other unexpected errors.
-                 printf "  ✗ Failed to add key '%s' (status: %d - unexpected error)\\n" "$keyfile" "$ssh_add_status"
-                 log_error "Failed to add key '$keyfile' (Path: $key_path, Status: $ssh_add_status - Unexpected error)."
-                ((failed_count++))
-            fi
-        else
-            # Key file listed in $VALID_KEY_LIST_FILE does not exist in $SSH_DIR.
-            printf "  ✗ Key file '%s' listed but not found at '%s' (skipped)\\n" "$keyfile" "$key_path"
-            log_warn "Key file '$keyfile' listed in '$VALID_KEY_LIST_FILE' but not found at '$key_path'."
-            ((failed_count++)) # Increment failure counter.
+        log_warn "Key list file '$VALID_KEY_LIST_FILE' is empty or does not exist. No keys to add."
+        if [[ "$quiet_mode" == false ]]; then
+            printf "Warning: Key list file '%s' is empty or does not exist. No keys to add.\n" "$VALID_KEY_LIST_FILE"
         fi
-    # Read from the specified list file.
-    done < "$VALID_KEY_LIST_FILE"
-    # Capture the exit status of the `while read` loop itself (important for detecting read errors).
-    local read_status=$?
-    # Re-enable exit-on-error now that the loop is finished.
-    set -e
-
-    # --- Check Read Status ---
-    # If `read` exited with non-zero status (and not 1 which can mean EOF), log an error.
-    if [ $read_status -ne 0 ] && [ $read_status -ne 1 ]; then
-        log_error "add_keys_to_agent: Error occurred while reading key list file '$VALID_KEY_LIST_FILE' (read exit status: $read_status)."
-        return 1 # Indicate failure reading the list.
+        return 1 # Nothing to do
     fi
 
-    # --- Print Summary ---
-    printf "\\nSummary: %d key(s) added, %d key(s) failed/skipped.\\n" "$added_count" "$failed_count"
-    log_info "Finished adding keys from list. Added: $added_count, Failed/Skipped: $failed_count"
+    platform=$(uname -s)
+    log_debug "Detected platform: $platform"
 
-    # --- Return Status ---
-    # Return success (0) if at least one key was added, otherwise failure (1).
-    [ "$added_count" -gt 0 ] && return 0 || return 1
+    # --- Read the list file and validate paths ---
+    while IFS= read -r keyfile || [[ -n "$keyfile" ]]; do
+        ((line_count++))
+        # Skip empty lines or lines starting with #
+        [[ -z "$keyfile" || "$keyfile" == \#* ]] && continue
 
-} # END add_keys_to_agent
+        key_path="$SSH_DIR/$keyfile"
+        log_debug "Processing line $line_count: '$keyfile' -> '$key_path'"
+
+        if [ -f "$key_path" ]; then
+            key_paths_to_add+=("$key_path")
+        else
+            log_warn "Key file '$keyfile' listed but not found at '$key_path'. Skipping."
+            ((invalid_path_count++))
+            if [[ "$quiet_mode" == false ]]; then
+                 printf "  ✗ Key file '%s' listed but not found at '%s' (skipped).\n" "$keyfile" "$key_path"
+            fi
+        fi
+    done < "$VALID_KEY_LIST_FILE"
+    local read_status=$?
+    if [[ $read_status -ne 0 ]]; then
+         log_error "Error reading key list file '$VALID_KEY_LIST_FILE' (read status: $read_status)."
+         # Still proceed if some keys were read before the error
+    fi
+
+    if [ ${#key_paths_to_add[@]} -eq 0 ]; then
+        log_warn "No valid key file paths found to add after reading list."
+         if [[ "$quiet_mode" == false ]]; then
+             printf "Warning: No valid key file paths found to add.\n"
+         fi
+        return 1 # Nothing valid to add
+    fi
+
+    log_info "Found ${#key_paths_to_add[@]} valid key paths to attempt adding."
+
+    # --- Execute ssh-add (Bulk or Loop) ---
+    if [[ "$bulk_mode" == true ]]; then
+        # --- Bulk Mode ---
+        log_info "Attempting to add ${#key_paths_to_add[@]} keys in a single bulk call..."
+        log_debug "Bulk keys: ${key_paths_to_add[*]}"
+
+        local -a ssh_add_cmd=("ssh-add")
+        if [[ "$platform" == "Darwin" ]]; then
+            ssh_add_cmd+=("--apple-use-keychain")
+            log_debug "Adding --apple-use-keychain for Darwin."
+        fi
+        ssh_add_cmd+=("${key_paths_to_add[@]}")
+
+        log_debug "Executing bulk command: ${ssh_add_cmd[*]}"
+        local ssh_add_output
+        # Run command, capture output (stderr redirected), allow failure
+        ssh_add_output=$("${ssh_add_cmd[@]}" 2>&1 || true)
+        local ssh_add_status=${PIPESTATUS[0]:-$?}
+        log_debug "Bulk ssh-add call finished with status: $ssh_add_status"
+
+        case $ssh_add_status in
+            0)
+                log_info "Bulk ssh-add reported success (status 0). Assumed all specified keys added."
+                success_count=${#key_paths_to_add[@]} # Assume all succeeded
+                return_status=0 # Overall success
+                ;;
+            1)
+                log_warn "Bulk ssh-add reported partial failure (status 1). Some keys might require passphrase or be invalid."
+                log_warn "Bulk ssh-add output (if any): $ssh_add_output"
+                # Treat as overall success for setup purposes, but log clearly.
+                # We can't know *which* ones succeeded without parsing output, which is complex.
+                success_count=1 # Indicate at least *potential* success
+                return_status=0 # Treat partial success as OK
+                ;;
+            *)
+                log_error "Bulk ssh-add failed critically (status: $ssh_add_status). Could not add keys."
+                log_error "Bulk ssh-add output (if any): $ssh_add_output"
+                return_status=1 # Critical failure
+                ;;
+        esac
+
+    else
+        # --- Loop Mode ---
+        log_info "Attempting to add ${#key_paths_to_add[@]} keys individually..."
+        local key_to_add key_basename
+        for key_to_add in "${key_paths_to_add[@]}"; do
+            key_basename=$(basename "$key_to_add")
+            if [[ "$quiet_mode" == false ]]; then
+                printf "  Adding key: %s... " "$key_basename"
+            else
+                 log_debug "Adding key: $key_to_add"
+            fi
+
+            local -a ssh_add_cmd_single=("ssh-add")
+            if [[ "$platform" == "Darwin" ]]; then
+                 ssh_add_cmd_single+=("--apple-use-keychain")
+            fi
+            ssh_add_cmd_single+=("$key_to_add")
+
+            local ssh_add_output_single
+            ssh_add_output_single=$("${ssh_add_cmd_single[@]}" 2>&1 || true)
+            local ssh_add_status_single=${PIPESTATUS[0]:-$?}
+
+            if [ $ssh_add_status_single -eq 0 ]; then
+                if [[ "$quiet_mode" == false ]]; then printf "OK\n"; fi
+                log_debug "Successfully added key: $key_to_add"
+                ((success_count++))
+                return_status=0 # Mark overall success if at least one works
+            else
+                if [[ "$quiet_mode" == false ]]; then printf "FAIL (Status: %d)\n" "$ssh_add_status_single"; fi
+                log_warn "Failed to add key '$key_to_add' (Status: $ssh_add_status_single)."
+                if [[ -n "$ssh_add_output_single" ]]; then
+                    log_warn "ssh-add output for $key_basename: $ssh_add_output_single"
+                fi
+                ((failed_add_count++))
+                if [ $ssh_add_status_single -eq 2 ]; then
+                     log_error "Critical error (status 2) adding key '$key_to_add'. Could not connect to agent."
+                fi
+            fi
+        done
+
+        if [[ "$quiet_mode" == false ]]; then
+             printf "Finished adding keys. Success: %d, Failed: %d, Not Found: %d\n" \
+                    "$success_count" "$failed_add_count" "$invalid_path_count"
+        fi
+        log_info "Finished adding keys individually. Success: $success_count, Failed: $failed_add_count, Not Found: $invalid_path_count"
+    fi
+
+    log_debug "Exiting function: ${FUNCNAME[0]} (Overall Status: $return_status)"
+    return $return_status
+}
 
 
 # --- update_keys_list_file ---

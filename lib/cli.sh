@@ -46,7 +46,7 @@ usage() {
     # Use cat heredoc for easier formatting.
     # Show default/determined paths. Use :-<unavailable> if variables might not be set yet
     # (e.g., if called due to early argument parse error before setup_logging).
-    cat << EOF
+    cat <<EOF
 SSH Key Manager - $(basename "$0")
 
 Manages SSH keys in the ssh-agent via command-line options or an interactive menu.
@@ -119,7 +119,7 @@ EOF
 # ---
 parse_args() {
     # Initialize/Reset global state variables modified by parsing
-    ACTION="help"       # Default action
+    ACTION="help" # Default action
     source_key_file=""
     IS_VERBOSE="false"  # Default verbosity
     local parse_error=0 # Flag for parsing errors
@@ -138,25 +138,44 @@ parse_args() {
         eval set -- "$ARGS"
         while true; do
             case "$1" in
-                -l|--list)
-                    ACTION="list"; shift ;;
-                -a|--add)
-                    ACTION="add"; shift ;;
-                -f|--file)
-                    ACTION="file"; source_key_file="$2"; shift 2 ;;
-                -D|--delete-all)
-                    ACTION="delete-all"; shift ;;
-                -m|--menu)
-                    ACTION="menu"; shift ;;
-                -v|--verbose)
-                    IS_VERBOSE="true"; shift ;;
-                -h|--help)
-                    usage; exit 0 ;; # Handle help directly and exit successfully
-                --)
-                    shift; break ;;
-                *)
-                    log_error "Internal error during getopt argument processing near '$1'"
-                    parse_error=1; break ;;
+            -l | --list)
+                ACTION="list"
+                shift
+                ;;
+            -a | --add)
+                ACTION="add"
+                shift
+                ;;
+            -f | --file)
+                ACTION="file"
+                source_key_file="$2"
+                shift 2
+                ;;
+            -D | --delete-all)
+                ACTION="delete-all"
+                shift
+                ;;
+            -m | --menu)
+                ACTION="menu"
+                shift
+                ;;
+            -v | --verbose)
+                IS_VERBOSE="true"
+                shift
+                ;;
+            -h | --help)
+                usage
+                exit 0
+                ;; # Handle help directly and exit successfully
+            --)
+                shift
+                break
+                ;;
+            *)
+                log_error "Internal error during getopt argument processing near '$1'"
+                parse_error=1
+                break
+                ;;
             esac
         done
 
@@ -168,7 +187,7 @@ parse_args() {
 
         # Handle any remaining non-option arguments (currently ignored)
         if [ $# -gt 0 ]; then
-             log_warn "Ignoring non-option arguments: $*"
+            log_warn "Ignoring non-option arguments: $*"
         fi
 
     else
@@ -183,42 +202,70 @@ parse_args() {
             local arg="${args_copy[$i]}"
             # Only process flags if an action hasn't been set, except for -v and -h
             if [ "$FIRST_ACTION_SET" -eq 1 ] && [[ "$arg" != "-v" && "$arg" != "-h" ]]; then
-                 log_warn "Simple parser: Ignoring argument '$arg' after action '$ACTION' was already set."
-                 i=$((i + 1))
-                 continue
+                log_warn "Simple parser: Ignoring argument '$arg' after action '$ACTION' was already set."
+                i=$((i + 1))
+                continue
             fi
 
             case $arg in
-                -l) ACTION="list"; FIRST_ACTION_SET=1; i=$((i + 1)) ;;
-                -a) ACTION="add"; FIRST_ACTION_SET=1; i=$((i + 1)) ;;
-                -f)
-                    local next_arg_index=$((i + 1))
-                    local next_arg="${args_copy[$next_arg_index]:-}"
-                    if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
-                        log_error "Simple parser: Option '$arg' requires a filename argument."
-                        parse_error=1; break
-                    fi
-                    ACTION="file"; source_key_file="$next_arg"; FIRST_ACTION_SET=1
-                    i=$((i + 2)) ;;
-                -D) ACTION="delete-all"; FIRST_ACTION_SET=1; i=$((i + 1)) ;;
-                -m) ACTION="menu"; FIRST_ACTION_SET=1; i=$((i + 1)) ;;
-                -v) IS_VERBOSE="true"; i=$((i + 1)) ;;
-                -h) usage; exit 0 ;; # Handle help directly
-                *)
-                    if [[ "$arg" == -* ]]; then
-                        # Check if it looks like an invalid combined short option
-                        if [[ ${#arg} -gt 2 ]]; then
-                            # Print specific error to stderr for combined options
-                            printf "Error: Combined short options like '%s' are not supported without GNU getopt.\n       Try separate options (e.g., '%s %s') or install GNU getopt (e.g., 'brew install gnu-getopt').\\n\\n" "$arg" "${arg:0:2}" "-${arg:2:1}" >&2
-                        else
-                            # Log other unknown single-char options as DEBUG
-                            log_debug "Simple parser: Unknown or unsupported option '$arg'"
-                        fi
+            -l)
+                ACTION="list"
+                FIRST_ACTION_SET=1
+                i=$((i + 1))
+                ;;
+            -a)
+                ACTION="add"
+                FIRST_ACTION_SET=1
+                i=$((i + 1))
+                ;;
+            -f)
+                local next_arg_index=$((i + 1))
+                local next_arg="${args_copy[$next_arg_index]:-}"
+                if [[ -z "$next_arg" || "${next_arg:0:1}" == "-" ]]; then
+                    log_error "Simple parser: Option '$arg' requires a filename argument."
+                    parse_error=1
+                    break
+                fi
+                ACTION="file"
+                source_key_file="$next_arg"
+                FIRST_ACTION_SET=1
+                i=$((i + 2))
+                ;;
+            -D)
+                ACTION="delete-all"
+                FIRST_ACTION_SET=1
+                i=$((i + 1))
+                ;;
+            -m)
+                ACTION="menu"
+                FIRST_ACTION_SET=1
+                i=$((i + 1))
+                ;;
+            -v)
+                IS_VERBOSE="true"
+                i=$((i + 1))
+                ;;
+            -h)
+                usage
+                exit 0
+                ;; # Handle help directly
+            *)
+                if [[ "$arg" == -* ]]; then
+                    # Check if it looks like an invalid combined short option
+                    if [[ ${#arg} -gt 2 ]]; then
+                        # Print specific error to stderr for combined options
+                        printf "Error: Combined short options like '%s' are not supported without GNU getopt.\n       Try separate options (e.g., '%s %s') or install GNU getopt (e.g., 'brew install gnu-getopt').\\n\\n" "$arg" "${arg:0:2}" "-${arg:2:1}" >&2
                     else
-                         # Log unexpected non-option arg as ERROR
-                         log_error "Simple parser: Unexpected argument '$arg'"
+                        # Log other unknown single-char options as DEBUG
+                        log_debug "Simple parser: Unknown or unsupported option '$arg'"
                     fi
-                    parse_error=1; break ;;
+                else
+                    # Log unexpected non-option arg as ERROR
+                    log_error "Simple parser: Unexpected argument '$arg'"
+                fi
+                parse_error=1
+                break
+                ;;
             esac
         done
         if [ "$parse_error" -ne 0 ]; then return 1; fi # Indicate failure
@@ -228,15 +275,13 @@ parse_args() {
     # This condition should be less likely now that ACTION defaults to 'help',
     # but keep it as a safeguard.
     if [[ "$ACTION" == "help" ]] && [[ $# -eq 0 ]] && [[ "$FIRST_ACTION_SET" -eq 0 ]]; then
-         usage
-         exit 0
+        usage
+        exit 0
     fi
-
 
     log_debug "parse_args completed. ACTION='$ACTION', IS_VERBOSE='$IS_VERBOSE', source_key_file='$source_key_file'"
     return 0 # Success
 }
-
 
 # ==============================================================================
 # --- CLI Action Functions ---
@@ -304,9 +349,9 @@ run_load_keys() {
     log_debug "Ensuring agent is running (mode: load)..."
     # Use "load" mode: start agent if needed
     if ! ensure_ssh_agent "load"; then
-         log_error "Failed to ensure SSH agent is running. Cannot load keys."
-         printf "Error: Failed to connect to or start SSH agent. Cannot load keys.\n" >&2
-         exit 1
+        log_error "Failed to ensure SSH agent is running. Cannot load keys."
+        printf "Error: Failed to connect to or start SSH agent. Cannot load keys.\n" >&2
+        exit 1
     fi
 
     # Find potential keys and populate the temporary list file.
@@ -321,16 +366,19 @@ run_load_keys() {
         if [ "$update_status" -eq 1 ]; then
             log_info "run_load_keys: No keys found by update_keys_list_file. Clearing agent."
             # Ensure the persistent list is empty if no keys were found
-             > "$VALID_KEY_LIST_FILE" || log_warn "Could not clear persistent key list file $VALID_KEY_LIST_FILE"
+            >"$VALID_KEY_LIST_FILE" || log_warn "Could not clear persistent key list file $VALID_KEY_LIST_FILE"
         else
             log_error "run_load_keys: Failed to find keys using update_keys_list_file (status $update_status)."
-             # update_keys_list_file should log specific errors
+            # update_keys_list_file should log specific errors
             exit 1 # Exit on other errors finding keys
         fi
     else
         # Keys found, copy temp list to the persistent list file that add_keys_to_agent uses
         log_debug "Copying found keys from temp file '$KEYS_LIST_TMP' to '$VALID_KEY_LIST_FILE'"
-        cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE" || { log_error "Failed to copy temp key list."; exit 1; }
+        cp "$KEYS_LIST_TMP" "$VALID_KEY_LIST_FILE" || {
+            log_error "Failed to copy temp key list."
+            exit 1
+        }
         chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "Could not set permissions on $VALID_KEY_LIST_FILE"
     fi
 
@@ -371,9 +419,9 @@ run_delete_all_cli() {
     log_debug "Checking agent status (mode: check)..."
     # Use "check" mode: only proceed if agent already exists
     if ! ensure_ssh_agent "check"; then
-         log_info "No valid agent found (or error checking). Cannot delete keys."
-         printf "No running SSH agent found to delete keys from.\nHint: Start the menu with '%s --menu' or add keys first.\n" "$(basename "$0")" >&2
-         exit 1
+        log_info "No valid agent found (or error checking). Cannot delete keys."
+        printf "No running SSH agent found to delete keys from.\nHint: Start the menu with '%s --menu' or add keys first.\n" "$(basename "$0")" >&2
+        exit 1
     fi
 
     # Agent confirmed. Call the function that handles confirmation and deletion.
@@ -423,14 +471,17 @@ run_load_keys_from_file() {
     log_debug "Ensuring agent is running (mode: load)..."
     # Use "load" mode: start agent if needed
     if ! ensure_ssh_agent "load"; then
-         log_error "Failed to ensure SSH agent is running. Cannot load keys from file."
-         printf "Error: Failed to connect to or start SSH agent. Cannot load keys.\n" >&2
-         exit 1
+        log_error "Failed to ensure SSH agent is running. Cannot load keys from file."
+        printf "Error: Failed to connect to or start SSH agent. Cannot load keys.\n" >&2
+        exit 1
     fi
 
     # Prepare VALID_KEY_LIST_FILE by copying from source, removing comments/blanks
     log_debug "Preparing target list file $VALID_KEY_LIST_FILE from source $source_key_file"
-    grep -vE '^\s*(#|$)' "$source_key_file" > "$VALID_KEY_LIST_FILE" || { log_error "Failed to process source key file '$source_key_file'."; exit 1; }
+    grep -vE '^\s*(#|$)' "$source_key_file" >"$VALID_KEY_LIST_FILE" || {
+        log_error "Failed to process source key file '$source_key_file'."
+        exit 1
+    }
     chmod 600 "$VALID_KEY_LIST_FILE" 2>/dev/null || log_warn "Could not set permissions on $VALID_KEY_LIST_FILE"
 
     # Delete existing keys before adding from file
@@ -450,4 +501,4 @@ run_load_keys_from_file() {
 
 # ==============================================================================
 # --- End of Library ---
-# ============================================================================== 
+# ==============================================================================

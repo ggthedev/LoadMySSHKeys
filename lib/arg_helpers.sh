@@ -51,7 +51,7 @@ _check_gnu_getopt() {
     # 1. Try the standard `getopt` command first.
     #    GNU getopt has a specific test mode (`--test`) that exits with status 4.
     #    Redirect output/error streams to prevent clutter.
-    if getopt --test > /dev/null 2>&1; then
+    if getopt --test >/dev/null 2>&1; then
         # Check the exit status ($?) immediately after the command.
         if [ $? -eq 4 ]; then
             # Exit status 4 indicates GNU getopt compatibility.
@@ -59,7 +59,7 @@ _check_gnu_getopt() {
             cmd_path=$(command -v getopt) # Get the full path.
             log_debug "Found compatible GNU getopt via standard command: $cmd_path"
             GNU_GETOPT_CMD="$cmd_path" # Set the global variable.
-            ret_status=0 # Mark as success.
+            ret_status=0               # Mark as success.
         else
             # If exit status is not 4, the standard getopt is not GNU-compatible.
             log_debug "Standard 'getopt' command found but is not GNU-compatible (exit status: $?)"
@@ -77,8 +77,8 @@ _check_gnu_getopt() {
             if [ -x "$brew_getopt_path" ]; then
                 log_debug "Found compatible GNU getopt at Homebrew path: $brew_getopt_path"
                 GNU_GETOPT_CMD="$brew_getopt_path" # Set the global variable.
-                ret_status=0 # Mark as success.
-                break # Exit loop once found
+                ret_status=0                       # Mark as success.
+                break                              # Exit loop once found
             fi
         done
         if [ "$ret_status" -ne 0 ]; then
@@ -93,7 +93,7 @@ _check_gnu_getopt() {
             cmd_path=$(command -v gnu-getopt)
             log_debug "Found compatible GNU getopt via command name: gnu-getopt (Path: $cmd_path)"
             GNU_GETOPT_CMD="$cmd_path" # Set the global variable.
-            ret_status=0 # Mark as success.
+            ret_status=0               # Mark as success.
         fi
     fi
 

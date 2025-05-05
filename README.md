@@ -86,13 +86,13 @@ The script can be run with various command-line options or using an interactive 
 
 **Options:**
 
-*   `-l`, `--list`: List keys currently loaded in the ssh-agent.
-*   `-a`, `--add`: Find potential keys, clear agent, add found keys.
-*   `-f <file>`, `--file <file>`: Load keys listed in `<file>` after clearing agent.
-*   `-D`, `--delete-all`: Delete all keys from agent (prompts for confirmation).
-*   `-m`, `--menu`: Show the interactive text-based menu interface.
-*   `-v`, `--verbose`: Enable verbose (DEBUG level) logging.
-*   `-h`, `--help`: Display the help message.
+- `-l`, `--list`: List keys currently loaded in the ssh-agent.
+- `-a`, `--add`: Find potential keys, clear agent, add found keys.
+- `-f <file>`, `--file <file>`: Load keys listed in `<file>` after clearing agent.
+- `-D`, `--delete-all`: Delete all keys from agent (prompts for confirmation).
+- `-m`, `--menu`: Show the interactive text-based menu interface.
+- `-v`, `--verbose`: Enable verbose (DEBUG level) logging.
+- `-h`, `--help`: Display the help message.
 
 **macOS Argument Parsing Note:**
 
@@ -108,14 +108,14 @@ This enables support for features like combined short options (e.g., `-lv`) and 
 
 The script provides the following menu options:
 
-1.  **Set SSH Directory**: Interactively change the directory to scan for keys during the current menu session.
-2.  **List Current Loaded Keys**: Display a numbered list of keys currently loaded in ssh-agent (shows fingerprints).
-3.  **Load Key(s)**: Presents a numbered list of potential private keys (found via `.pub` check) and allows selecting one or more keys to add to the agent.
-4.  **Delete Single Key from Agent**: Presents a numbered list of potential private keys and allows selecting one to remove from the agent (`ssh-add -d`).
-5.  **Delete All Keys from Agent**: Remove all keys currently loaded in ssh-agent (`ssh-add -D`), after confirmation.
-6.  **Display Log File Info**: Show the location and size of the current log file.
-7.  **Reload Keys**: Deletes all keys from the agent (`ssh-add -D`) and then loads all potential private keys found (via `.pub` check) in the current SSH directory.
-8.  **Quit**: Exit the program.
+1. **Set SSH Directory**: Interactively change the directory to scan for keys during the current menu session.
+2. **List Current Loaded Keys**: Display a numbered list of keys currently loaded in ssh-agent (shows fingerprints).
+3. **Load Key(s)**: Presents a numbered list of potential private keys (found via `.pub` check) and allows selecting one or more keys to add to the agent.
+4. **Delete Single Key from Agent**: Presents a numbered list of potential private keys and allows selecting one to remove from the agent (`ssh-add -d`).
+5. **Delete All Keys from Agent**: Remove all keys currently loaded in ssh-agent (`ssh-add -D`), after confirmation.
+6. **Display Log File Info**: Show the location and size of the current log file.
+7. **Reload Keys**: Deletes all keys from the agent (`ssh-add -D`) and then loads all potential private keys found (via `.pub` check) in the current SSH directory.
+8. **Quit**: Exit the program.
 
 ## Configuration via Environment Variables
 
@@ -223,7 +223,7 @@ This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICE
 
 ## Version History
 
-- 0.0.1.2 (2025-04-28) 
+- 0.0.1.2 (2025-04-28)
   - Refactored code into modular library files (`lib/*.sh`).
   - Added Bats testing framework (`test/cli_behavior.bats`).
   - Updated test suite to use real `ssh-agent` and dynamic key generation.

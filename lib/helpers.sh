@@ -36,21 +36,21 @@ setup_platform_vars() {
 
     # Set platform-specific command for getting file size.
     case "$PLATFORM" in
-        "Darwin")
-            STAT_CMD="stat -f %z" # macOS stat command for size in bytes.
-            log_debug "Setting STAT_CMD for Darwin: '$STAT_CMD'"
-            ;;
-        "Linux")
-            STAT_CMD="stat -c %s" # Linux stat command for size in bytes.
-            log_debug "Setting STAT_CMD for Linux: '$STAT_CMD'"
-            ;;
-        *)
-            # Default to Linux style for other *nix systems, might need adjustment.
-            STAT_CMD="stat -c %s"
-            log_warn "Unsupported platform '$PLATFORM'. Defaulting STAT_CMD to Linux style: '$STAT_CMD'"
-            ;;
+    "Darwin")
+        STAT_CMD="stat -f %z" # macOS stat command for size in bytes.
+        log_debug "Setting STAT_CMD for Darwin: '$STAT_CMD'"
+        ;;
+    "Linux")
+        STAT_CMD="stat -c %s" # Linux stat command for size in bytes.
+        log_debug "Setting STAT_CMD for Linux: '$STAT_CMD'"
+        ;;
+    *)
+        # Default to Linux style for other *nix systems, might need adjustment.
+        STAT_CMD="stat -c %s"
+        log_warn "Unsupported platform '$PLATFORM'. Defaulting STAT_CMD to Linux style: '$STAT_CMD'"
+        ;;
     esac
 }
 # ==============================================================================
 # --- End of Library ---
-# ============================================================================== 
+# ==============================================================================
