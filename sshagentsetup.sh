@@ -42,7 +42,7 @@
 #     when added via `ssh-add` non-interactively.
 #
 # Logging Configuration:
-#   - Controlled by the `IS_VERBOSE` flag (set via `-v`/`--verbose` argument).
+#   - Controlled by the `_sa_IS_VERBOSE` flag (set via `-v`/`--verbose` argument).
 #   - Log file location determined automatically based on OS (macOS: ~/Library/Logs, Linux: /var/log or ~/.local/log)
 #     or can be overridden by setting the `SSH_AGENT_SETUP_LOG` environment variable.
 #
@@ -53,28 +53,15 @@
 # Avoids resetting if script is sourced multiple times in the same environment (though not recommended).
 _sa_script_start_time=${_sa_script_start_time:-$(date +%s.%N)}
 
-# Determine script directory to source libraries relative to the script itself
-# Handle the case where BASH_SOURCE might be empty (e.g., if script is piped)
-# Using a default directory of '.' if detection fails
-declare SCRIPT_DIR
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" &>/dev/null && pwd)
-
-# --- Set Platform Variable ---
-declare PLATFORM
-PLATFORM=$(uname -s) # Set PLATFORM for use by libraries
-
-# --- Source Libraries ---
-source "$SCRIPT_DIR/lib/logging.sh" # Source the logging library
-
 # Global flag to control verbose/debug logging. Set by sa_setup() argument parsing.
-declare IS_VERBOSE="false"
+declare _sa_IS_VERBOSE="false"
 
 # --- Configuration Variables ---
 # These variables define key locations used throughout the script.
 
-declare SSH_DIR="$HOME/.ssh"                                            # Standard SSH directory
-declare AGENT_ENV_FILE="$HOME/.config/sshkeymanager/agent.env"          # File to store/read agent connection details
-declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeymanager/ssh_keys_list" # Persistent file to cache list of valid key *basenames*
+declare SSH_DIR="$HOME/.ssh"                                         # Standard SSH directory
+declare AGENT_ENV_FILE="$HOME/.config/sshkeymanager/agent.env"       # File to store/read agent connection details
+declare VALID_KEY_LIST_FILE="$HOME/.config/sshkeymanager/ssh_keys_list"  # Persistent file to cache list of valid key *basenames*
 
 # --- Log File Configuration Variables ---
 # Define standard names and potential directory locations for the log file.
@@ -84,11 +71,207 @@ declare LOG_FILENAME="sshkeymanager.log"
 declare LOG_DIR_MACOS="$HOME/Library/Logs/sshkeymanager"
 declare LOG_DIR_LINUX_VAR="/var/log/sshkeymanager"
 declare LOG_DIR_LINUX_LOCAL="$HOME/.local/log/sshkeymanager"
-declare LOG_DIR_FALLBACK="$HOME/.ssh/logs" # Fallback if others fail
+declare LOG_DIR_FALLBACK="$HOME/.ssh/logs"                             # Fallback if others fail
 
 # --- Logging Setup ---
-# Logging setup is now handled by setup_logging() from lib/logging.sh
-# which is called within sa_setup() after argument parsing.
+# Determines the actual log file path to use.
+
+declare LOG_FILE="" # Initialize empty; will be set by setup logic if successful
+
+# Function: _setup_default_logging
+# Purpose: Determines the appropriate default log file path based on the OS,
+#          creates the necessary directory and log file, and sets the LOG_FILE variable.
+#
+# Inputs:
+#   - Global Variables: LOG_DIR_MACOS, LOG_DIR_LINUX_VAR, LOG_DIR_LINUX_LOCAL,
+#                     LOG_DIR_FALLBACK, LOG_FILENAME
+#
+# Outputs:
+#   - Global Variables: Sets LOG_FILE to the determined path if successful, otherwise leaves it empty.
+#   - Files Modified: Creates the log directory and touches the log file ($LOG_FILE).
+#   - Return Value: 0 on success, 1 on failure (directory/file creation failed).
+#
+# Core Logic:
+#   1. Uses `uname -s` to detect the operating system (Darwin, Linux, other).
+#   2. Selects the preferred log directory based on OS conventions and permissions.
+#   3. Constructs the full target log path.
+#   4. Attempts to create the log directory (`mkdir -p`).
+#   5. Attempts to create the log file (`touch`).
+#   6. If successful, sets the global LOG_FILE variable and sets file permissions (chmod 600).
+_setup_default_logging() {
+    set -u # Enable strict mode for this function
+
+    local target_log_path
+    local log_dir
+    local platform
+
+    platform=$(uname -s)
+
+    # Determine platform-specific default log directory
+    case "$platform" in
+        "Darwin")
+            log_dir="$LOG_DIR_MACOS"
+            ;;
+        "Linux")
+            # Prefer /var/log if writable, else use ~/.local
+            if [ -w "$(dirname "$LOG_DIR_LINUX_VAR")" ]; then # Check writability of parent
+                 log_dir="$LOG_DIR_LINUX_VAR"
+            else
+                log_dir="$LOG_DIR_LINUX_LOCAL"
+            fi
+            ;;
+        *)
+            # Fallback for other systems
+            log_dir="$LOG_DIR_FALLBACK"
+            ;;
+    esac
+
+    target_log_path="$log_dir/$LOG_FILENAME"
+
+    # Attempt to create directory and file
+    if ! mkdir -p "$log_dir" 2>/dev/null; then
+        # Cannot create directory, logging remains disabled
+        LOG_FILE=""
+        set +u # Disable strict mode before returning
+        return 1
+    fi
+    if ! touch "$target_log_path" 2>/dev/null; then
+        # Cannot create file, logging remains disabled
+        LOG_FILE=""
+        set +u # Disable strict mode before returning
+        return 1
+    fi
+
+    # Set log file path and permissions if successful
+    LOG_FILE="$target_log_path"
+    chmod 600 "$LOG_FILE" 2>/dev/null || true # Best effort on chmod
+    set +u # Disable strict mode before returning
+    return 0
+}
+
+# Check if logging is explicitly enabled via environment variable
+if [ -n "${SSH_AGENT_SETUP_LOG:-}" ]; then
+    log_dir=$(dirname "$SSH_AGENT_SETUP_LOG")
+    target_log_path="$SSH_AGENT_SETUP_LOG" # Use the full path provided
+
+    if mkdir -p "$log_dir" 2>/dev/null && touch "$target_log_path" 2>/dev/null; then
+        LOG_FILE="$target_log_path"
+        chmod 600 "$LOG_FILE" 2>/dev/null || true
+    else
+        # Explicit path given but failed to create/touch. Logging disabled.
+        LOG_FILE=""
+        # Optionally print a warning to stderr if this script were interactive
+        : # No output for sourced script
+    fi
+else
+    # Environment variable not set, try setting up default logging
+    if ! _setup_default_logging; then
+         # Default setup failed, LOG_FILE will be empty
+         : # No output for sourced script
+    fi
+fi
+
+# --- Logging Functions (Conditional) ---
+
+# Function: _log_base
+# Purpose: Core internal function for writing log entries to the configured log file.
+#          Handles timestamping and formatting.
+#          Checks if LOG_FILE is configured before attempting to write.
+#
+# Inputs:
+#   - Arguments: $1=LogLevel (e.g., "INFO", "DEBUG"), $2=LogMessage
+#   - Global Variables: LOG_FILE
+#
+# Outputs:
+#   - Files Modified: Appends the formatted log message to $LOG_FILE.
+#
+# Core Logic:
+#   1. Checks if LOG_FILE is empty; returns immediately if it is.
+#   2. Gets the current timestamp.
+#   3. Uses `printf` to format and append the log entry (Timestamp - PID - Level - Message).
+_log_base() {
+    # Only log if LOG_FILE is set (not empty)
+    [ -z "$LOG_FILE" ] && return 0 # Exit if LOG_FILE wasn't successfully configured
+    local type="$1"
+    local msg="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    # Use printf for safer handling of potentially weird characters in msg
+    printf "%s - %s - %s - %s\n" "$timestamp" "$$" "$type" "$msg" >> "$LOG_FILE"
+} # END _log_base
+
+# Function: log_info, log_error, log_warn, log_debug
+# Purpose: Convenience wrappers around _log_base for specific standard log levels.
+#          `log_debug` includes an additional check for the `_sa_IS_VERBOSE` flag.
+#
+# Inputs:
+#   - Arguments: $1=LogMessage
+#   - Global Variables: _sa_IS_VERBOSE (for log_debug only)
+#
+# Outputs: (Via _log_base)
+#   - Files Modified: Appends the formatted log message to $LOG_FILE.
+
+log_info() { _log_base "INFO" "$1"; }
+log_error() { _log_base "ERROR" "$1"; }
+log_warn() { _log_base "WARN" "$1"; }
+log_debug() {
+    # Only log if verbose mode is enabled
+    [ "$_sa_IS_VERBOSE" = "true" ] || return 0
+    _log_base "DEBUG" "$1";
+} # END log_debug
+
+# --- _log_marker ---
+# Internal helper to write markers, ensuring they are written even if logging is disabled initially
+_log_marker() {
+    local marker_text="$1"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    # Use printf to stderr if LOG_FILE is /dev/null or empty during early stages
+    if [[ "$LOG_FILE" == "/dev/null" || -z "$LOG_FILE" ]]; then # Use double brackets and check for empty
+        # Also check for empty LOG_FILE as it might not be set to /dev/null
+        printf "%s - %s - MARKER: %s\n" "$timestamp" "$$" "$marker_text" >&2
+    else
+        echo "$timestamp - $$ - MARKER: $marker_text" >> "$LOG_FILE"
+    fi
+}
+
+# --- Library Sourcing ---
+# Define the script's directory using its known absolute path for reliable sourcing
+declare SCRIPT_DIR
+SCRIPT_DIR="/Users/experimentalist/TRAINING/MYZEN/LANGUAGES/BASH/SSHKEYGEN/AutoLoadSSHKEYS"
+
+# Define the library directory relative to the script directory
+LIB_DIR="$SCRIPT_DIR/lib"
+
+# Source required library files
+# Use '.' (source) and check existence for robustness
+if [ -f "$LIB_DIR/logging.sh" ]; then
+    . "$LIB_DIR/logging.sh"
+else
+    echo "Error: Library file not found: $LIB_DIR/logging.sh" >&2
+    return 1 # Use return as this script is sourced
+fi
+
+# if [ -f "$LIB_DIR/utils.sh" ]; then
+#     . "$LIB_DIR/utils.sh"
+# else
+#     echo "Error: Library file not found: $LIB_DIR/utils.sh" >&2
+#     return 1
+# fi
+
+if [ -f "$LIB_DIR/agent.sh" ]; then
+    . "$LIB_DIR/agent.sh"
+else
+    echo "Error: Library file not found: $LIB_DIR/agent.sh" >&2
+    return 1
+fi
+
+if [ -f "$LIB_DIR/key_ops.sh" ]; then
+    . "$LIB_DIR/key_ops.sh"
+else
+    echo "Error: Library file not found: $LIB_DIR/key_ops.sh" >&2
+    return 1
+fi
 
 # --- Helper and Finalization Functions ---
 
@@ -106,13 +289,13 @@ declare LOG_DIR_FALLBACK="$HOME/.ssh/logs" # Fallback if others fail
 #   1. Checks if the persistent key list file exists.
 #   2. (Commented out) Optionally remove the file (`rm -f`).
 _sa_cleanup() {
-    # Use parameter expansion default to handle potentially unset variable with set -u
-    if [ -n "${VALID_KEY_LIST_FILE:-}" ] && [ -f "${VALID_KEY_LIST_FILE:-}" ]; then
-        # Decide if we should remove the persistent list file on exit?
-        # For now, let's keep it as it caches the valid keys found.
-        # log_debug "_sa_cleanup: Removing key list file $VALID_KEY_LIST_FILE"
-        : # No cleanup needed for the persistent file
-    fi
+  # Use parameter expansion default to handle potentially unset variable with set -u
+  if [ -n "${VALID_KEY_LIST_FILE:-}" ] && [ -f "${VALID_KEY_LIST_FILE:-}" ]; then
+    # Decide if we should remove the persistent list file on exit?
+    # For now, let's keep it as it caches the valid keys found.
+    # log_debug "_sa_cleanup: Removing key list file $VALID_KEY_LIST_FILE"
+    : # No cleanup needed for the persistent file
+  fi
 } # END _sa_cleanup
 
 # Function: _sa_log_execution_time
@@ -139,7 +322,7 @@ _sa_log_execution_time() {
         log_debug "_sa_log_execution_time: End time captured: ${_sa_end_time}"
 
         # Use bc for floating point calculation if available
-        if command -v bc >/dev/null; then
+        if command -v bc > /dev/null; then
             log_debug "_sa_log_execution_time: Found 'bc'. Attempting calculation: ${_sa_end_time} - ${_sa_script_start_time}"
             _sa_script_duration=$(echo "$_sa_end_time - $_sa_script_start_time" | bc -l)
             local bc_status=$?
@@ -156,15 +339,15 @@ _sa_log_execution_time() {
             log_warn "'bc' command not found, attempting fallback to integer seconds."
             # Fallback to integer seconds using parameter expansion (more portable)
             local _sa_start_seconds _sa_end_seconds
-            _sa_start_seconds=${_sa_script_start_time%%.*}
-            _sa_end_seconds=${_sa_end_time%%.*}
-            log_debug "_sa_log_execution_time: Fallback seconds: Start=$_sa_start_seconds, End=$_sa_end_seconds"
-            if [[ -n "$_sa_start_seconds" && -n "$_sa_end_seconds" ]]; then
-                _sa_script_duration=$((_sa_end_seconds - _sa_start_seconds))
-                log_info "Total setup script execution time: ${_sa_script_duration} seconds."
-            else
-                log_error "_sa_log_execution_time: Failed to parse integer seconds for fallback calculation."
-            fi
+             _sa_start_seconds=${_sa_script_start_time%%.*}
+             _sa_end_seconds=${_sa_end_time%%.*}
+             log_debug "_sa_log_execution_time: Fallback seconds: Start=$_sa_start_seconds, End=$_sa_end_seconds"
+             if [[ -n "$_sa_start_seconds" && -n "$_sa_end_seconds" ]]; then
+                 _sa_script_duration=$((_sa_end_seconds - _sa_start_seconds))
+                 log_info "Total setup script execution time: ${_sa_script_duration} seconds."
+             else
+                 log_error "_sa_log_execution_time: Failed to parse integer seconds for fallback calculation."
+             fi
         fi
     else
         log_warn "_sa_log_execution_time: Could not calculate execution time: start time variable (_sa_script_start_time) not found."
@@ -190,15 +373,14 @@ _sa_log_execution_time() {
 #   4. Appends basenames of valid keys to the target file.
 #   5. Returns 0 if keys found and written, 1 otherwise.
 _sa_write_valid_key_basenames_to_file() {
-    trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u             # Enable strict mode for this function
+    set -u # Enable strict mode for this function
 
     local target_file="$1"
     log_debug "_sa_write_valid_key_basenames_to_file: Entering function. Target file: '$target_file'"
 
     if [ -z "$target_file" ]; then
         log_error "_sa_write_valid_key_basenames_to_file: No target file specified."
-        # set +u # Disable strict mode before returning - Handled by trap
+        set +u # Disable strict mode before returning
         return 1
     fi
 
@@ -215,7 +397,7 @@ _sa_write_valid_key_basenames_to_file() {
         log_debug "_sa_write_valid_key_basenames_to_file: Creating directory for target file: $target_dir"
         if ! mkdir -p "$target_dir"; then
             log_error "_sa_write_valid_key_basenames_to_file: Failed to create directory '$target_dir'. Cannot proceed."
-            # set +u # Disable strict mode before returning - Handled by trap
+            set +u # Disable strict mode before returning
             return 1
         fi
         chmod 700 "$target_dir" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_dir"
@@ -240,8 +422,8 @@ _sa_write_valid_key_basenames_to_file() {
         else
             log_debug "_sa_write_valid_key_basenames_to_file:   No matching .pub file found at '$pub_filepath'. Skipping."
         fi
-        # Use find to get basenames of files not ending in .pub
-        # Ensure find operates directly in SSH_DIR to avoid path issues with basename
+    # Use find to get basenames of files not ending in .pub
+    # Ensure find operates directly in SSH_DIR to avoid path issues with basename
     done < <(find "$SSH_DIR" -maxdepth 1 -type f ! -name '*.pub' -exec basename {} \;)
 
     log_debug "_sa_write_valid_key_basenames_to_file: Finished checking candidates."
@@ -249,344 +431,83 @@ _sa_write_valid_key_basenames_to_file() {
     if [ ${#valid_key_basenames[@]} -eq 0 ]; then
         log_info "_sa_write_valid_key_basenames_to_file: No private keys with corresponding .pub files found in $SSH_DIR. Clearing target file."
         # Clear the target file even if no keys are found
-        if ! : >"$target_file"; then # Using :> for truncation, safer than > potentially
-            log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
-            # set +u # Disable strict mode before returning - Handled by trap
-            return 1
+        if ! :> "$target_file"; then # Using :> for truncation, safer than > potentially
+             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file'."
+             set +u # Disable strict mode before returning
+             return 1
         fi
         chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
-        # set +u # Disable strict mode before returning - Handled by trap
+        set +u # Disable strict mode before returning
         return 1 # Indicate failure if no valid keys found
     else
         log_info "_sa_write_valid_key_basenames_to_file: Found ${#valid_key_basenames[@]} private key file(s). Writing to '$target_file'..."
 
         # Clear the target file first
-        if ! : >"$target_file"; then
-            log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
-            # set +u # Disable strict mode before returning - Handled by trap
-            return 1
+        if ! :> "$target_file"; then
+             log_error "_sa_write_valid_key_basenames_to_file: Failed to clear target file '$target_file' before writing."
+             set +u # Disable strict mode before returning
+             return 1
         fi
         chmod 600 "$target_file" 2>/dev/null || log_warn "_sa_write_valid_key_basenames_to_file: Could not set permissions on $target_file"
 
         # Write the array elements one per line to the file
         local basename
         for basename in "${valid_key_basenames[@]}"; do
-            echo "$basename" >>"$target_file"
+            echo "$basename" >> "$target_file"
             if [ $? -ne 0 ]; then
                 log_error "_sa_write_valid_key_basenames_to_file: Failed to write basename '$basename' to '$target_file'."
                 # Optionally decide whether to abort or continue
-                # set +u # Disable strict mode before returning - Handled by trap
+                set +u # Disable strict mode before returning
                 return 1 # Abort on first write error
             fi
         done
         log_info "_sa_write_valid_key_basenames_to_file: Successfully wrote ${#valid_key_basenames[@]} basenames to '$target_file'."
-        # set +u # Disable strict mode before returning - Handled by trap
+        set +u # Disable strict mode before returning
         return 0 # Success
     fi
 } # END _sa_write_valid_key_basenames_to_file
 
-# Function: _sa_check_ssh_agent
-# Purpose: Checks if the currently set SSH_AUTH_SOCK and SSH_AGENT_PID environment
-#          variables point to a live and accessible ssh-agent process.
+# Function: _sa_count_keys_in_agent
+# Purpose: Uses `ssh-add -l` to count the number of keys currently loaded in the agent.
+#          Returns the count or 1 if the command fails (indicating the agent is not accessible).
 #
-# Inputs:
-#   - Environment Variables: SSH_AUTH_SOCK, SSH_AGENT_PID (uses default expansion `${VAR:-}`)
-#
-# Outputs:
-#   - Return Value: 0 if the agent is running and accessible, 1 otherwise.
-#   - Log Output: Debug/Error messages indicating check status.
-#
-# Core Logic:
-#   1. Checks if SSH_AUTH_SOCK and SSH_AGENT_PID are non-empty.
-#   2. Checks if SSH_AUTH_SOCK points to an existing socket file (`-S`).
-#   3. Checks if SSH_AGENT_PID corresponds to a running process (`ps -p`).
-#   4. Attempts communication using `ssh-add -l`. Status 0 (keys exist) or 1 (no keys)
-#      are considered successful communication. Status 2 or higher indicates failure.
-_sa_check_ssh_agent() {
-    trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u             # Enable strict mode for this function
-
-    log_debug "_sa_check_ssh_agent: Checking agent status... (PID='${SSH_AGENT_PID:-}', SOCK='${SSH_AUTH_SOCK:-}')"
-    if [ -z "${SSH_AUTH_SOCK:-}" ] || [ -z "${SSH_AGENT_PID:-}" ]; then
-        log_debug "_sa_check_ssh_agent: Required environment variables not set."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1
-    fi
-    # Check if the socket file exists
-    if [ ! -S "$SSH_AUTH_SOCK" ]; then
-        log_error "_sa_check_ssh_agent: SSH_AUTH_SOCK is not a socket: $SSH_AUTH_SOCK"
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1
-    fi
-    # Check if the agent process is running
-    if ! ps -p "$SSH_AGENT_PID" >/dev/null 2>&1; then
-        log_error "_sa_check_ssh_agent: SSH_AGENT_PID ($SSH_AGENT_PID) process not running."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1
-    fi
-    # Check communication with the agent
-    # Use ssh-add -l, allow status 1 (no keys) as successful communication
-    ssh-add -l >/dev/null 2>&1 || true
-    local check_status=${PIPESTATUS[0]:-$?}
-    log_debug "_sa_check_ssh_agent: ssh-add -l communication status: $check_status"
-    if [ "$check_status" -eq 0 ] || [ "$check_status" -eq 1 ]; then
-        log_debug "_sa_check_ssh_agent: Agent communication successful (status $check_status)."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 0 # Success
-    fi
-    log_error "_sa_check_ssh_agent: Cannot communicate with agent (ssh-add -l status $check_status)."
-    # set +u # Disable strict mode before returning - Handled by trap
-    return 1 # Failure
-}            # END _sa_check_ssh_agent
-
-# Function: _sa_ensure_ssh_agent
-# Purpose: Ensures a valid ssh-agent is running and its environment variables
-#          (SSH_AUTH_SOCK, SSH_AGENT_PID) are exported in the current shell scope.
-#          It prioritizes reusing an existing agent found via environment variables
-#          or the persistent agent environment file.
-#
-# Inputs:
-#   - Global Variables: AGENT_ENV_FILE, SSH_DIR
-#   - Environment Variables: Checks existing SSH_AUTH_SOCK, SSH_AGENT_PID.
+# Inputs: None.
 #
 # Outputs:
-#   - Exports: Exports SSH_AUTH_SOCK and SSH_AGENT_PID into the current shell environment.
-#   - Files Modified: Creates/overwrites AGENT_ENV_FILE with new agent details if a new agent is started.
-#                    Removes AGENT_ENV_FILE if it points to a stale/invalid agent.
-#   - Return Value: 0 on success (agent running and vars exported), 1 on failure.
+#   - Return Value: The number of keys loaded in the agent, or 1 if the agent is inaccessible.
+#   - Log Output: Debug messages about the process.
 #
 # Core Logic:
-#   1. Check Current Environment: If SSH_AUTH_SOCK/PID are set and `_sa_check_ssh_agent` passes, export them and return success.
-#   2. Check Persistent File: If AGENT_ENV_FILE exists:
-#      a. Unset current SSH_AUTH_SOCK/PID.
-#      b. Source AGENT_ENV_FILE.
-#      c. If `_sa_check_ssh_agent` passes, export the sourced variables and return success.
-#      d. If check fails, remove the stale AGENT_ENV_FILE and unset the variables.
-#   3. Start New Agent: If no valid agent found yet:
-#      a. Ensure $SSH_DIR exists.
-#      b. Execute `ssh-agent -s` to start a new agent and capture its output.
-#      c. Parse the output using `sed` to extract the new socket and PID.
-#      d. Export the new SSH_AUTH_SOCK and SSH_AGENT_PID variables.
-#      e. Write the export commands for the new variables to AGENT_ENV_FILE.
-#      f. Perform a final verification using `_sa_check_ssh_agent`.
-#      g. Return success (0) or failure (1) based on verification.
-_sa_ensure_ssh_agent() {
-    trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u             # Enable strict mode for this function
+#   1. Executes `ssh-add -l` and captures its output.
+#   2. Parses the output to count the number of keys.
+#   3. Returns the count.
+#   4. If `ssh-add` fails, returns 1.
+_sa_count_keys_in_agent() {
+    set -u # Enable strict mode for this function
 
-    log_debug "_sa_ensure_ssh_agent: Entering function."
-
-    # 1. Check if already configured and working in this environment
-    log_debug "_sa_ensure_ssh_agent: Checking current environment..."
-    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -n "${SSH_AGENT_PID:-}" ] && _sa_check_ssh_agent; then
-        log_info "_sa_ensure_ssh_agent: Agent already running and sourced (PID: $SSH_AGENT_PID)."
-        # Ensure they are exported, just in case they weren't initially
-        export SSH_AUTH_SOCK SSH_AGENT_PID
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 0
-    fi
-    log_debug "_sa_ensure_ssh_agent: Agent not valid in current environment."
-
-    # 2. Try sourcing persistent environment file
-    if [ -f "$AGENT_ENV_FILE" ]; then
-        log_debug "_sa_ensure_ssh_agent: Found persistent file: $AGENT_ENV_FILE. Sourcing..."
-        # Unset potentially stale vars before sourcing
-        unset SSH_AUTH_SOCK SSH_AGENT_PID
-        # Source the file into the current shell's environment
-        # shellcheck disable=SC1090 # File path is from variable
-        . "$AGENT_ENV_FILE" >/dev/null
-        log_debug "_sa_ensure_ssh_agent: Sourced persistent file. Checking agent status again..."
-        if _sa_check_ssh_agent; then
-            log_info "_sa_ensure_ssh_agent: Sourcing persistent file successful. Reusing agent (PID: $SSH_AGENT_PID)."
-            # Ensure they are exported
-            export SSH_AUTH_SOCK SSH_AGENT_PID
-            # set +u # Disable strict mode before returning - Handled by trap
-            return 0
-        else
-            log_warn "_sa_ensure_ssh_agent: Persistent file found but agent invalid/inaccessible after sourcing. Removing stale file."
-            rm -f "$AGENT_ENV_FILE" # Remove stale file
-            # Unset potentially incorrect variables sourced from the stale file
-            unset SSH_AUTH_SOCK SSH_AGENT_PID
-        fi
-    else
-        log_debug "_sa_ensure_ssh_agent: No persistent agent file found ($AGENT_ENV_FILE)."
-    fi
-
-    # 3. Start a new agent
-    log_info "_sa_ensure_ssh_agent: Starting new ssh-agent..."
-
-    # Ensure .ssh directory exists
-    if ! mkdir -p "$SSH_DIR" 2>/dev/null; then
-        log_error "_sa_ensure_ssh_agent: Failed to create SSH directory $SSH_DIR"
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1
-    fi
-    if ! chmod 700 "$SSH_DIR" 2>/dev/null; then log_warn "_sa_ensure_ssh_agent: Failed to set permissions on $SSH_DIR"; fi
-
-    # Start ssh-agent and capture output
-    local agent_output
-    if ! agent_output=$(ssh-agent -s); then
-        log_error "_sa_ensure_ssh_agent: Failed to execute ssh-agent -s"
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1
-    fi
-    log_debug "_sa_ensure_ssh_agent: ssh-agent -s output captured."
-
-    # Extract environment variables (handle potential variations in output)
-    local new_sock new_pid
-    new_sock=$(echo "$agent_output" | sed -n 's/SSH_AUTH_SOCK=\([^;]*\);.*/\1/p')
-    new_pid=$(echo "$agent_output" | sed -n 's/SSH_AGENT_PID=\([^;]*\);.*/\1/p')
-
-    if [ -z "$new_sock" ] || [ -z "$new_pid" ]; then
-        log_error "_sa_ensure_ssh_agent: Failed to extract env vars from output: $agent_output"
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1
-    fi
-    log_debug "_sa_ensure_ssh_agent: Extracted SOCK=$new_sock PID=$new_pid"
-
-    # Export variables into the current shell's environment
-    export SSH_AUTH_SOCK="$new_sock"
-    export SSH_AGENT_PID="$new_pid"
-    log_debug "_sa_ensure_ssh_agent: Exported new agent variables into current scope."
-
-    # Save agent environment variables to persistent file
-    log_debug "_sa_ensure_ssh_agent: Saving agent environment to $AGENT_ENV_FILE"
-    {
-        # Use printf for reliability
-        printf 'SSH_AUTH_SOCK=%s; export SSH_AUTH_SOCK;\n' "$new_sock"
-        printf 'SSH_AGENT_PID=%s; export SSH_AGENT_PID;\n' "$new_pid"
-        printf '# Agent started on %s by %s\n' "$(date)" "$(basename "$0")"
-    } >"$AGENT_ENV_FILE"
-    if ! chmod 600 "$AGENT_ENV_FILE"; then log_warn "_sa_ensure_ssh_agent: Failed to set permissions on $AGENT_ENV_FILE"; fi
-    log_debug "_sa_ensure_ssh_agent: Agent environment saved."
-
-    # Final verification (using the exported variables in current scope)
-    log_debug "_sa_ensure_ssh_agent: Performing final verification of new agent..."
-    if _sa_check_ssh_agent; then
-        log_info "_sa_ensure_ssh_agent: New agent started and verified successfully (PID: $SSH_AGENT_PID)."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 0 # Success!
-    else
-        log_error "_sa_ensure_ssh_agent: Started new agent but failed final verification."
-        # Clean up potentially bad environment state
-        unset SSH_AUTH_SOCK SSH_AGENT_PID
-        rm -f "$AGENT_ENV_FILE" # Remove possibly bad file
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1 # Failure!
-    fi
-} # END _sa_ensure_ssh_agent
-
-# Function: _sa_add_keys_to_agent
-# Purpose: Reads a list of key *basenames* from the VALID_KEY_LIST_FILE,
-#          constructs their full paths, and attempts to add them to the
-#          currently running ssh-agent using a single `ssh-add` command.
-#
-# Inputs:
-#   - Global Variables: VALID_KEY_LIST_FILE, SSH_DIR
-#
-# Outputs:
-#   - Agent State: Adds keys to the ssh-agent.
-#   - Return Value: 0 if `ssh-add` call succeeded (status 0 or 1), 1 if `ssh-add` failed critically (status 2+).
-#                 Returns 1 immediately if key list file is empty or no valid paths found.
-#   - Log Output: Info/Warn/Error messages about the process.
-#
-# Core Logic:
-#   1. Checks if VALID_KEY_LIST_FILE exists and is non-empty.
-#   2. Reads each line (key basename) from VALID_KEY_LIST_FILE.
-#   3. Constructs the full path ($SSH_DIR/$basename).
-#   4. Checks if the full path points to an existing file.
-#   5. Adds valid full paths to the `key_paths_to_add` array.
-#   6. If no valid paths are found, returns 1.
-#   7. Builds the `ssh-add` command array.
-#   8. Adds `--apple-use-keychain` on Darwin.
-#   9. Appends all valid key paths to the command array.
-#  10. Executes the `ssh-add` command with all keys at once.
-#  11. Checks the exit status of `ssh-add`:
-#      - 0 (Success): Returns 0.
-#      - 1 (Partial failure, likely passphrases needed): Logs warning, returns 0 (treated as OK for setup).
-#      - 2+ (Connection error or other failure): Logs error, returns 1.
-_sa_add_keys_to_agent() {
-    trap 'set +u' EXIT # Ensure strict mode is disabled on exit (use EXIT for portability)
-    set -u             # Enable strict mode for this function
-
-    log_debug "_sa_add_keys_to_agent: Entering function (single call version)."
-    log_info "_sa_add_keys_to_agent: Preparing to add keys listed in $VALID_KEY_LIST_FILE..."
-    local keyfile
-    local key_path
-    local key_paths_to_add=() # Array to hold full paths
-    local platform
-    platform=$(uname -s)
-
-    # Check if VALID_KEY_LIST_FILE exists and is non-empty
-    if [ ! -s "$VALID_KEY_LIST_FILE" ]; then
-        log_warn "_sa_add_keys_to_agent: Key list file ($VALID_KEY_LIST_FILE) is empty or does not exist. No keys to add."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1 # Nothing to add
-    fi
-
-    # Read filenames and construct full paths
-    log_debug "_sa_add_keys_to_agent: Reading filenames from $VALID_KEY_LIST_FILE..."
-    local line_count=0
-    local invalid_path_count=0
-    while IFS= read -r keyfile || [ -n "$keyfile" ]; do
-        ((line_count++))
-        [ -z "$keyfile" ] && continue # Skip empty lines
-        key_path="$SSH_DIR/$keyfile"
-        log_debug "_sa_add_keys_to_agent: Processing line $line_count: $keyfile -> $key_path"
-
-        if [ -f "$key_path" ]; then
-            key_paths_to_add+=("$key_path")
-        else
-            log_warn "_sa_add_keys_to_agent: Key file '$keyfile' listed but not found at '$key_path'. Skipping."
-            ((invalid_path_count++))
-        fi
-    done <"$VALID_KEY_LIST_FILE"
-
-    if [ ${#key_paths_to_add[@]} -eq 0 ]; then
-        log_warn "_sa_add_keys_to_agent: No valid key file paths found to add after reading list."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1 # Nothing valid to add
-    fi
-
-    log_info "_sa_add_keys_to_agent: Attempting to add ${#key_paths_to_add[@]} keys in a single call..."
-    log_debug "_sa_add_keys_to_agent: Keys: ${key_paths_to_add[*]}"
-
-    local ssh_add_cmd=("ssh-add")
-    if [[ "$platform" == "Darwin" ]]; then
-        ssh_add_cmd+=("--apple-use-keychain")
-    fi
-    ssh_add_cmd+=("${key_paths_to_add[@]}")
-
-    # Execute the single ssh-add command silently, capture status
-    log_debug "_sa_add_keys_to_agent: Executing: ${ssh_add_cmd[*]}"
-    # Redirect stderr to stdout to potentially log errors if needed, allow failure
+    log_debug "_sa_count_keys_in_agent: Executing ssh-add -l to count keys..."
     local ssh_add_output
-    ssh_add_output=$("${ssh_add_cmd[@]}" 2>&1 || true)
-    local ssh_add_status=${PIPESTATUS[0]:-$?}
-    log_debug "_sa_add_keys_to_agent: Single ssh-add call finished with status: $ssh_add_status"
+    ssh_add_output=$(ssh-add -l 2>&1)
+    local ssh_add_status=$?
+    log_debug "_sa_count_keys_in_agent: ssh-add -l finished with status: $ssh_add_status"
 
-    # Basic check: Status 0 is success, status 1 might mean some failed (e.g., passphrase), status 2 is agent connection error
-    if [ $ssh_add_status -eq 0 ]; then
-        log_info "_sa_add_keys_to_agent: ssh-add reported success (status 0). Assumed all specified keys added."
-        log_debug "_sa_add_keys_to_agent: Exiting function (status: 0)."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 0
-    elif [ $ssh_add_status -eq 1 ]; then
-        # Status 1 implies some keys failed, often due to passphrases.
-        # Log this as a warning but consider the setup potentially successful otherwise.
-        log_warn "_sa_add_keys_to_agent: ssh-add reported partial failure (status 1). Some keys might require passphrase or be invalid."
-        log_warn "ssh-add output (if any): $ssh_add_output"
-        log_debug "_sa_add_keys_to_agent: Exiting function (status: 0 - partial success treated as OK for setup)."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 0 # Treat partial success as OK for setup purposes
-    else         # Status 2 or other errors
-        log_error "_sa_add_keys_to_agent: ssh-add failed (status: $ssh_add_status). Could not add keys."
-        log_error "ssh-add output (if any): $ssh_add_output"
-        log_debug "_sa_add_keys_to_agent: Exiting function (status: 1 - failure)."
-        # set +u # Disable strict mode before returning - Handled by trap
-        return 1 # Major failure
+    if [ $ssh_add_status -ne 0 ]; then
+        log_error "_sa_count_keys_in_agent: ssh-add failed with status $ssh_add_status. Assuming agent is inaccessible."
+        set +u # Disable strict mode before returning
+        return 1
     fi
-} # END _sa_add_keys_to_agent
+
+    # Parse the output to count keys
+    local key_count=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue # Skip empty lines
+        ((key_count++))
+    done <<< "$ssh_add_output"
+
+    log_debug "_sa_count_keys_in_agent: Found $key_count keys in agent."
+    set +u # Disable strict mode before returning
+    return $key_count
+} # END _sa_count_keys_in_agent
 
 # --- Main Setup Function ---
 # This function orchestrates the primary setup process when the script is sourced.
@@ -600,7 +521,7 @@ _sa_add_keys_to_agent() {
 # Inputs:
 #   - Arguments: Optionally accepts `-v` or `--verbose` for debug logging,
 #                followed by an optional filename containing a list of key names to load.
-#   - Global Variables: Uses SSH_DIR, VALID_KEY_LIST_FILE, and modifies IS_VERBOSE.
+#   - Global Variables: Uses SSH_DIR, VALID_KEY_LIST_FILE, and modifies _sa_IS_VERBOSE.
 #   - Environment Variables: Relies on `_sa_ensure_ssh_agent` to set SSH_AUTH_SOCK/PID.
 #
 # Outputs:
@@ -612,7 +533,7 @@ _sa_add_keys_to_agent() {
 #
 # Core Logic:
 #   1. Enables `set -u` locally for robustness.
-#   2. Parses arguments to check for verbose flag (`-v`/`--verbose`) and sets `IS_VERBOSE`.
+#   2. Parses arguments to check for verbose flag (`-v`/`--verbose`) and sets `_sa_IS_VERBOSE`.
 #   3. Calls `_sa_ensure_ssh_agent` to start/reuse agent and export variables. Exits on failure.
 #   4. Determines key loading method (`scan` or `file`) based on remaining arguments.
 #   5. If method is `file`, validates the input file and copies its contents (basenames)
@@ -621,73 +542,60 @@ _sa_add_keys_to_agent() {
 #      VALID_KEY_LIST_FILE by scanning $SSH_DIR.
 #   7. Checks if VALID_KEY_LIST_FILE is usable.
 #   8. Compares key count in agent (`ssh-add -l`) with count in VALID_KEY_LIST_FILE.
-#   9. If counts differ or agent check failed, calls `_sa_add_keys_to_agent`.
-#  10. If counts match, skips calling `_sa_add_keys_to_agent`.
+#   9. If counts differ or agent check failed, calls `add_keys_to_agent --bulk --quiet`.
+#  10. If counts match, skips calling `add_keys_to_agent`.
 #  11. Calls `_sa_log_execution_time`.
 #  12. Disables `set -u` and returns status.
 sa_setup() {
-    # set -u # Enable strict mode for this function - MOVED to be after setup_logging
-    #
-    # log_debug "sa_setup: Main setup function invoked." # Cannot log before setup
+    set -u # Enable strict mode for this function
+
+    log_debug "sa_setup: Main setup function invoked."
+
+    # --- Log Script Start --- 
+    # Must be called *after* logging functions are defined and LOG_FILE is potentially set.
+    _log_marker "_______<=:START:=> SSH Agent Setup Script______"
 
     # --- Argument Parsing ---
     local key_list_source_file=""
+    local quiet_mode=false # Add quiet_mode flag
+    # Process arguments manually (safer for sourcing)
     local arg
-    # We need IS_VERBOSE potentially set BEFORE setup_logging
-    # so parse args first.
     for arg in "$@"; do
         case "$arg" in
-        -v | --verbose)
-            IS_VERBOSE="true"
-            # log_debug "Verbose logging enabled by argument." # Cannot log yet
-            shift # Consume the argument
-            ;;
-        -*)
-            # log_warn "Unknown option ignored: $arg" # Cannot log yet
-            shift # Consume the argument
-            ;;
-        *)
-            # Assume the first non-option argument is the key list file
-            if [ -z "$key_list_source_file" ]; then
-                key_list_source_file="$arg"
-                # log_info "Key list source file specified: $key_list_source_file" # Cannot log yet
-            else
-                # log_warn "Ignoring additional argument: $arg" # Cannot log yet
-                :
-            fi
-            shift # Consume the argument
-            ;;
+            -v|--verbose)
+                _sa_IS_VERBOSE="true"
+                log_debug "Verbose logging enabled by argument."
+                shift # Consume the argument
+                ;;
+            -q|--quiet) # Add quiet flag parsing
+                quiet_mode=true
+                log_debug "Quiet mode enabled by argument."
+                shift # Consume the argument
+                ;;
+            -*)
+                log_warn "Unknown option ignored: $arg"
+                shift # Consume the argument
+                ;;
+            *)
+                # Assume the first non-option argument is the key list file
+                if [ -z "$key_list_source_file" ]; then
+                    key_list_source_file="$arg"
+                    log_info "Key list source file specified: $key_list_source_file"
+                else
+                    log_warn "Ignoring additional argument: $arg"
+                fi
+                shift # Consume the argument
+                ;;
         esac
     done
 
-    # --- Setup Logging (Must happen before any logging calls) ---
-    # Call setup_logging from the sourced library
-    setup_logging # This function should handle setting LOG_FILE
-    # local setup_log_status=$?
-    # printf "DEBUG_TERM: setup_logging status: %s\n" "$setup_log_status" >&2 # DEBUG Removed
-    # printf "DEBUG_TERM: LOG_FILE after setup_logging: [%s]\n" "${LOG_FILE:-UNSET}" >&2 # DEBUG Removed
-
-    # --- Enable Strict Mode (Now safe to log errors if it fails) ---
-    set -u
-
-    # --- Log Script Start and Config (Now safe) ---
-    _log_marker "_______<=:START:=> SSH Agent Setup Script______"
-    log_debug "Starting SSH Agent Setup Script (PID: $$)..."
-    log_debug "IS_VERBOSE flag set to: ${IS_VERBOSE}"
-    log_debug "Using SSH Directory: $SSH_DIR"
-    log_debug "Using Agent Env File: $AGENT_ENV_FILE"
-    log_debug "Using Valid Key List File: $VALID_KEY_LIST_FILE"
-    if [ -n "$key_list_source_file" ]; then
-        log_info "Key list source file specified: $key_list_source_file"
-    fi
-    # Log any warnings about ignored args here if needed
-
     # --- Agent Check / Start ---
     log_info "Checking/starting SSH agent..."
-    if ! _sa_ensure_ssh_agent; then
+    # Pass quiet_mode status to ensure_ssh_agent
+    if ! ensure_ssh_agent "load" "$quiet_mode"; then 
         log_error "Failed to ensure SSH agent is running. Aborting setup."
-        _log_marker "_______<=:EXIT:=> SSH Agent Setup Script (Agent Ensure Failed)______"
         set +u # Disable strict mode before returning
+        _log_marker "_______<=:EXIT:=> SSH Agent Setup Script (Agent Ensure Failed)______"
         return 1
     fi
     log_info "SSH Agent is running and sourced (PID: ${SSH_AGENT_PID:-Unknown})."
@@ -706,16 +614,15 @@ sa_setup() {
             log_warn "Scanning and loading keys from directory '$SSH_DIR' encountered issues."
         fi
     fi
-
+    add_keys_to_agent --bulk --quiet
     # --- Finalization ---
     log_debug "SSH agent setup process completed."
     _sa_log_execution_time # Log execution time
-    _log_marker "_______<=:EXIT:=> SSH Agent Setup Script (Agent Ensure Success)______"
-    # printf "DEBUG_TERM: LOG_FILE before exit: [%s]\n" "${LOG_FILE:-UNSET}" >&2 # DEBUG Removed
     set +u # Disable strict mode before returning
+    _log_marker "_______<=:EXIT:=> SSH Agent Setup Script (Agent Ensure Success)______"
     return 0
 } # END sa_setup
 
 # --- Auto-Execution Trigger ---
 # Call the main setup function, passing any arguments provided during sourcing.
-sa_setup "$@"
+sa_setup "$@" 
