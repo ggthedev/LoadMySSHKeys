@@ -54,7 +54,8 @@
 _sa_script_start_time=${_sa_script_start_time:-$(date +%s.%N)}
 
 # Global flag to control verbose/debug logging. Set by sa_setup() argument parsing.
-declare _sa_IS_VERBOSE="false"
+#declare _sa_IS_VERBOSE="false"
+declare _sa_IS_QUIET="false"
 
 # --- Configuration Variables ---
 # These variables define key locations used throughout the script.
@@ -214,7 +215,7 @@ _log_base() {
 _log_info() { _log_base "INFO" "$1"; }
 _log_error() { _log_base "ERROR" "$1"; }
 _log_warn() { _log_base "WARN" "$1"; }
-_log_debug() { _log_base "DEBUG" "$1"; }
+_log_debug() { [ "$_saIS_QUIET" = "true" ] && _log_base "DEBUG" "$1"; }
 
 # --- _log_marker ---
 # Internal helper to write markers, ensuring they are written even if logging is disabled initially
@@ -626,7 +627,7 @@ sa_setup() {
                 shift # Consume the argument
                 ;;
             -q|--quiet) # Add quiet flag parsing
-                quiet_mode=true
+                _sa_IS_QUIET="true"
                 log_debug "Quiet mode enabled by argument."
                 shift # Consume the argument
                 ;;
@@ -672,7 +673,7 @@ sa_setup() {
             log_warn "Scanning and loading keys from directory '$SSH_DIR' encountered issues."
         fi
     fi
-    add_keys_to_agent --bulk --quiet
+    add_keys_to_agent --bulk 
     # --- Finalization ---
     log_debug "SSH agent setup process completed."
     _sa_log_execution_time # Log execution time

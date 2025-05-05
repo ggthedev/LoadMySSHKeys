@@ -368,7 +368,7 @@ _validate_and_export_agent() {
 # ---
 ensure_ssh_agent() {
     local mode="${1:-load}" # Default to 'load' mode if not specified
-    local quiet_mode="${2:-false}" # Accept quiet mode flag, default false
+    local quiet_mode="${_sa_IS_QUIET:-false}" # Accept quiet mode flag, default false
     local agent_found_valid=false
     local file_agent_pid file_agent_sock parsed_output parse_status
 
