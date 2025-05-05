@@ -44,7 +44,7 @@ fi
 # ---
 add_keys_to_agent() {
     local bulk_mode=false
-    local quiet_mode=false
+    local quiet_mode="$_sa_IS_QUIET"
     local keyfile key_path platform
     local -a key_paths_to_add=() # Array for full paths
     local -i success_count=0 invalid_path_count=0 failed_add_count=0 line_count=0
